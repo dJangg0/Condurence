@@ -24,7 +24,15 @@ export function AgentNode({ data, selected }: NodeProps<AgentFlowNode>) {
   return (
     <div
       className={`w-60 rounded-lg border bg-zinc-900 shadow-lg shadow-black/40 transition-colors ${
-        selected ? "border-indigo-400 ring-2 ring-indigo-500/30" : "border-zinc-700 hover:border-zinc-500"
+        selected
+          ? "border-indigo-400 ring-2 ring-indigo-500/30"
+          : data.status === "running"
+            ? "animate-pulse border-blue-400 ring-2 ring-blue-500/40"
+            : data.status === "waiting_approval"
+              ? "animate-pulse border-amber-400 ring-2 ring-amber-500/40"
+              : data.status === "error"
+                ? "border-red-500/70"
+                : "border-zinc-700 hover:border-zinc-500"
       }`}
     >
       <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
@@ -39,7 +47,7 @@ export function AgentNode({ data, selected }: NodeProps<AgentFlowNode>) {
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide">
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300" title={PROVIDER_LABELS[data.provider]}>
               {data.provider}
-              {data.model ? ` · ${data.model}` : ""}
+              {data.model ? ` · ${data.model}` : ""}{data.effort ? ` · ${data.effort}` : ""}
             </span>
             <span
               className={`rounded px-1.5 py-0.5 ${

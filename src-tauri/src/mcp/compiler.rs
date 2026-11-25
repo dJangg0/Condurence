@@ -232,6 +232,7 @@ pub fn invocation(
     provider: AgentProvider,
     mode: Mode,
     model: &str,
+    effort: &str,
     system: &str,
     prompt: &str,
     bridge: &BridgeAddress,
@@ -264,6 +265,14 @@ pub fn invocation(
                 }
             }
             push_model(&mut args, model, "--model");
+            if !effort.is_empty() {
+                args.extend(["--effort".into(), effort.to_string()]);
+            }
+            // Headless runs cannot answer permission prompts, and `acceptEdits` does not cover MCP
+            // tools, so without this the child's `report_task_result` is silently refused. The
+            // user wired these edges themselves, and approval gates are enforced by the router.
+            // The `=` form keeps the variadic flag from swallowing the arguments after it.
+            args.push(format!("--allowedTools=mcp__{SERVER_KEY}"));
             args.extend(["--mcp-config".into(), config.to_string_lossy().into_owned()]);
             if !system.is_empty() {
                 args.extend(["--append-system-prompt".into(), system.to_string()]);
@@ -289,6 +298,9 @@ pub fn invocation(
                 }
             }
             push_model(&mut args, model, "-m");
+            if !effort.is_empty() {
+                args.extend(["-c".into(), format!("model_reasoning_effort={}", toml_string(effort))]);
+            }
             let arg_list: Vec<String> = bridge_args(bridge).iter().map(|a| toml_string(a)).collect();
             args.extend([
                 "-c".into(),
@@ -476,7 +488,7 @@ mod tests {
             instance_id: "senior-dev.1",
             token: "t",
         };
-        let inv = invocation(AgentProvider::Claude, Mode::Headless, "sonnet", "SYS", "do it", &bridge, dir.path()).unwrap();
+        let inv = invocation(AgentProvider::Claude, Mode::Headless, "sonnet", "", "SYS", "do it", &bridge, dir.path()).unwrap();
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.args[0], "-p");
         assert!(inv.args.contains(&"stream-json".to_string()));
@@ -484,6 +496,27 @@ mod tests {
         let config = dir.path().join("senior-dev.1.claude-mcp.json");
         let json: Value = serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
         assert_eq!(json["mcpServers"]["openconductor"]["args"][0], "--mcp-bridge");
+    }
+
+    #[test]
+    fn effort_is_passed_to_claude_and_codex_and_omitted_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = BridgeAddress { exe: Path::new("/bin/oc"), port: 1, run_id: "r", instance_id: "n.1", token: "t" };
+
+        let claude = invocation(AgentProvider::Claude, Mode::Headless, "claude-haiku-5-5", "low", "SYS", "hi", &bridge, dir.path()).unwrap();
+        let at = claude.args.iter().position(|a| a == "--effort").expect("--effort present");
+        assert_eq!(claude.args[at + 1], "low");
+        let model = claude.args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(claude.args[model + 1], "claude-haiku-5-5");
+
+        let codex = invocation(AgentProvider::Codex, Mode::Headless, "", "low", "SYS", "hi", &bridge, dir.path()).unwrap();
+        assert!(codex.args.iter().any(|a| a == "model_reasoning_effort=\"low\""), "{:?}", codex.args);
+
+        // The orchestrator's own MCP tools are pre-allowed so headless children can report back.
+        assert!(claude.args.iter().any(|a| a == "--allowedTools=mcp__openconductor"), "{:?}", claude.args);
+
+        let plain = invocation(AgentProvider::Claude, Mode::Headless, "", "", "SYS", "hi", &bridge, dir.path()).unwrap();
+        assert!(!plain.args.iter().any(|a| a == "--effort"));
     }
 
     #[test]
@@ -497,12 +530,12 @@ mod tests {
             instance_id: "senior-dev.1",
             token: "t",
         };
-        let headless = invocation(AgentProvider::Opencode, Mode::Headless, "anthropic/sonnet", "SYS", "do it", &bridge, dir.path()).unwrap();
+        let headless = invocation(AgentProvider::Opencode, Mode::Headless, "anthropic/sonnet", "", "SYS", "do it", &bridge, dir.path()).unwrap();
         assert_eq!(headless.args[0], "run");
         assert!(headless.args.contains(&"--auto".to_string()), "headless runs must auto-approve");
         assert!(headless.env.iter().any(|(key, _)| key == "OPENCODE_CONFIG"));
 
-        let interactive = invocation(AgentProvider::Opencode, Mode::Interactive, "", "SYS", "goal", &bridge, dir.path()).unwrap();
+        let interactive = invocation(AgentProvider::Opencode, Mode::Interactive, "", "", "SYS", "goal", &bridge, dir.path()).unwrap();
         assert_eq!(interactive.args[0], "--prompt");
         assert!(!interactive.args.contains(&"--auto".to_string()));
     }
@@ -519,7 +552,7 @@ mod tests {
             token: "t",
         };
         for mode in [Mode::Headless, Mode::Interactive] {
-            let inv = invocation(AgentProvider::Gemini, mode, "", "SYS", "do it", &bridge, dir.path()).unwrap();
+            let inv = invocation(AgentProvider::Gemini, mode, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
             assert!(inv.args.contains(&"--skip-trust".to_string()), "{mode:?} must pass --skip-trust");
         }
     }

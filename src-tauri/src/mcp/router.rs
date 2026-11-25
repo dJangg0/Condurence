@@ -403,7 +403,7 @@ impl Router {
         } else {
             NodeStatus::Idle
         };
-        self.set_status(run, target_id, status, Some(excerpt(&outcome.summary, 200)), Some(session.id.clone()));
+        self.set_status(run, target_id, status, Some(excerpt(&outcome.headline, 200)), Some(session.id.clone()));
 
         Ok(json!({
             "node": target_id,
@@ -464,6 +464,7 @@ impl Router {
             node.data.provider,
             mode,
             &node.data.model,
+            &node.data.effort,
             system,
             prompt,
             &bridge,
@@ -715,6 +716,9 @@ pub struct Outcome {
     pub status: String,
     pub exit_code: Option<i32>,
     pub summary: String,
+    /// One line for the canvas card. The agent's own first line when it reported; otherwise the
+    /// most telling line of its terminal output, never the echoed prompt at the top of it.
+    pub headline: String,
 }
 
 /// Pure outcome resolution: an explicit report wins, otherwise the exit code decides.
@@ -725,21 +729,55 @@ fn resolve_outcome(report: Option<Report>, exit_code: Option<i32>, cancelled: bo
             status: "cancelled".into(),
             exit_code,
             summary: final_text(history),
+            headline: "Cancelled".into(),
         };
     }
     if let Some(report) = report {
+        let headline = headline_of(&report.summary, false, false);
         return Outcome {
             status: report.status,
             exit_code,
             summary: report.summary,
+            headline,
         };
     }
-    let status = if exit_code == Some(0) { "completed" } else { "failed" };
+    let failed = exit_code != Some(0);
+    let clean = strip_ansi(history);
+    // A structured result line is the agent's own answer. Without one, the output is a raw
+    // terminal log whose first lines are the echoed prompt, so look at its end instead.
+    let (summary, from_log) = match stream_result(&clean) {
+        Some(text) => (text, false),
+        None => (excerpt_tail(clean.trim(), SUMMARY_TAIL_CHARS), true),
+    };
+    let headline = headline_of(&summary, from_log, failed);
     Outcome {
-        status: status.into(),
+        status: if failed { "failed" } else { "completed" }.into(),
         exit_code,
-        summary: final_text(history),
+        summary,
+        headline,
     }
+}
+
+/// One card-sized line from `text`. For raw terminal logs of a failed run it prefers the last
+/// line that mentions an error, so "402 Payment Required" shows instead of the prompt echo.
+fn headline_of(text: &str, from_log: bool, failed: bool) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let Some(first) = lines.first() else {
+        return String::new();
+    };
+    if !from_log {
+        return (*first).to_string();
+    }
+    if failed {
+        let telling = lines.iter().rev().find(|line| {
+            let lower = line.to_lowercase();
+            ["error", "failed", "denied", "refused", "unauthorized"].iter().any(|word| lower.contains(word))
+        });
+        if let Some(line) = telling {
+            return (*line).to_string();
+        }
+    }
+    lines.last().map(|line| (*line).to_string()).unwrap_or_default()
 }
 
 /// Enforces acyclic delegation and escalation chains. Verification edges may loop (the
@@ -842,6 +880,11 @@ async fn wait_for_exit(receiver: &mut watch::Receiver<Option<i32>>) -> i32 {
 /// CLIs fall back to the last few thousand characters of their output.
 pub fn final_text(raw: &str) -> String {
     let clean = strip_ansi(raw);
+    stream_result(&clean).unwrap_or_else(|| excerpt_tail(clean.trim(), SUMMARY_TAIL_CHARS))
+}
+
+/// The `result` of the last Claude stream-json `{"type":"result"}` line, if there is one.
+fn stream_result(clean: &str) -> Option<String> {
     for line in clean.lines().rev() {
         let trimmed = line.trim();
         if !trimmed.starts_with('{') {
@@ -850,12 +893,12 @@ pub fn final_text(raw: &str) -> String {
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             if value.get("type").and_then(Value::as_str) == Some("result") {
                 if let Some(text) = value.get("result").and_then(Value::as_str) {
-                    return text.to_string();
+                    return Some(text.to_string());
                 }
             }
         }
     }
-    excerpt_tail(clean.trim(), SUMMARY_TAIL_CHARS)
+    None
 }
 
 fn excerpt_tail(text: &str, max_chars: usize) -> String {
@@ -945,6 +988,26 @@ mod tests {
         assert_eq!(resolve_outcome(None, Some(0), false, "done").status, "completed");
         assert_eq!(resolve_outcome(None, Some(1), false, "boom").status, "failed");
         assert_eq!(resolve_outcome(None, None, true, "").status, "cancelled");
+    }
+
+    #[test]
+    fn failed_log_headline_shows_the_error_not_the_echoed_prompt() {
+        let log = "user\r\n## Completion\r\nWhen your task is finished call report_task_result\r\n\r\nERROR: Reconnecting... 5/5\r\nERROR: unexpected status 402 Payment Required\r\n";
+        let outcome = resolve_outcome(None, Some(1), false, log);
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.headline, "ERROR: unexpected status 402 Payment Required");
+    }
+
+    #[test]
+    fn successful_log_headline_is_the_last_line_and_reports_use_their_first_line() {
+        let outcome = resolve_outcome(None, Some(0), false, "user\r\nthe prompt echo\r\nHello from codex\r\n");
+        assert_eq!(outcome.headline, "Hello from codex");
+
+        let report = Report { status: "completed".into(), summary: "Added greeting.\nSecond line.".into() };
+        assert_eq!(resolve_outcome(Some(report), Some(0), false, "").headline, "Added greeting.");
+
+        let json = "{\"type\":\"result\",\"result\":\"Hello!\\nBye\"}\r\n";
+        assert_eq!(resolve_outcome(None, Some(0), false, json).headline, "Hello!");
     }
 
     #[test]

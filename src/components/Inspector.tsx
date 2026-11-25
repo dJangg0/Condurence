@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import {
+  EFFORT_LEVELS,
   PROVIDERS,
   PROVIDER_LABELS,
   RELATION_HELP,
@@ -9,6 +10,7 @@ import {
   type RelationType,
   type WorktreeMode,
 } from "../types/orchestration";
+import { ModelPicker } from "./ModelPicker";
 import { MAX_RETRIES_LIMIT, type AgentFlowNode, type RoutingFlowEdge } from "../lib/graph";
 
 const FIELD =
@@ -78,7 +80,7 @@ export function NodeInspector({
           <select
             className={FIELD}
             value={data.provider}
-            onChange={(e) => onChange({ provider: e.target.value as AgentProvider })}
+            onChange={(e) => onChange({ provider: e.target.value as AgentProvider, model: "", effort: "" })}
           >
             {PROVIDERS.map((provider) => (
               <option key={provider} value={provider}>
@@ -87,10 +89,26 @@ export function NodeInspector({
             ))}
           </select>
         </Field>
-        <Field label="Model" hint="Passed to the CLI as-is. Empty uses its default.">
-          <input className={FIELD} value={data.model} placeholder="opus" onChange={(e) => onChange({ model: e.target.value })} />
+        <Field label="Model" hint="Models this provider offers. Custom lets you type another.">
+          <ModelPicker provider={data.provider} value={data.model} onChange={(model) => onChange({ model })} />
         </Field>
       </div>
+
+      <Field label="Reasoning effort" hint="Claude and Codex only. Lower is faster and cheaper. Default uses the CLI's own setting.">
+        <select
+          className={FIELD}
+          value={data.effort}
+          disabled={data.provider === "gemini" || data.provider === "opencode"}
+          onChange={(e) => onChange({ effort: e.target.value })}
+        >
+          <option value="">Default</option>
+          {EFFORT_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+      </Field>
 
       <Field label="Worktree isolation" hint="Shared reuses the upstream worktree (live edits). Isolated gets a child branch.">
         <select

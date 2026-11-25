@@ -1,5 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import {
+  EFFORT_LEVELS,
   RELATION_LABELS,
   type AgentNodeData,
   type OrchestrationGraph,
@@ -19,6 +20,7 @@ export function defaultAgentData(name = "New agent"): AgentNodeData {
     role: "",
     provider: "claude",
     model: "",
+    effort: "",
     skills: [],
     contextPaths: [],
     systemPrompt: "",
@@ -37,6 +39,8 @@ export function edgePresentation(data: RoutingEdgeData): Partial<RoutingFlowEdge
   const dash = data.relationType === "verifies" ? "6 4" : data.relationType === "escalates_to" ? "2 4" : undefined;
   const suffix = data.requiresApproval ? " · approval" : "";
   return {
+    // Rendered by FlowEdge, which animates the line while agents are talking.
+    type: "flow",
     label: `${RELATION_LABELS[data.relationType]} · ${data.maxRetries}×${suffix}`,
     style: { stroke: color, strokeWidth: 1.75, strokeDasharray: dash },
     labelStyle: { fill: "#d4d4d8", fontSize: 11 },
@@ -104,6 +108,9 @@ export function validateGraph(graph: OrchestrationGraph): string[] {
     if (ids.has(node.id)) problems.push(`Duplicate node id "${node.id}".`);
     ids.add(node.id);
     if (!node.data.name.trim()) problems.push(`Node "${node.id}" needs a name.`);
+    if (node.data.effort && !(EFFORT_LEVELS as readonly string[]).includes(node.data.effort)) {
+      problems.push(`Node "${node.id}" has unknown effort "${node.data.effort}".`);
+    }
   }
   const edgeIds = new Set<string>();
   for (const edge of graph.edges) {
