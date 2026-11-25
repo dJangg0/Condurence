@@ -41,7 +41,7 @@ pub fn run_if_requested(args: impl IntoIterator<Item = String>) -> Option<i32> {
             token,
         },
         _ => {
-            eprintln!("open-conductor --mcp-bridge: missing --port/--run-id/--instance-id/--token");
+            eprintln!("Condurence --mcp-bridge: missing --port/--run-id/--instance-id/--token");
             return Some(2);
         }
     };

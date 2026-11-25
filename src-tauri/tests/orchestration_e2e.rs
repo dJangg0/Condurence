@@ -111,7 +111,7 @@ fn build_harness(db: Arc<StateDb>, provider: &Path) -> Harness {
     let locks = Arc::new(RepoLocks::default());
     let (listener, port) = server::bind_loopback().unwrap();
     // The real binary serves --mcp-bridge, exactly as it does for an installed app.
-    let bridge_exe = PathBuf::from(env!("CARGO_BIN_EXE_open-conductor"));
+    let bridge_exe = PathBuf::from(env!("CARGO_BIN_EXE_Condurence"));
     let router = Arc::new(Router::new(events, db, pty, locks, port, bridge_exe));
     server::serve(listener, router.clone()).unwrap();
     Harness { router, sink }
