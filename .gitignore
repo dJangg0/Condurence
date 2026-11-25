@@ -1,0 +1,11 @@
+# Dependencies & build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Local agent context and tool state
+.context/
+.worktrees/
+.DS_Store
+*.log

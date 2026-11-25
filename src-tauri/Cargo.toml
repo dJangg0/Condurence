@@ -1,0 +1,49 @@
+[package]
+name = "open-conductor"
+version = "0.1.0"
+description = "OpenConductor: native ADE with worktree workspaces and railway-style multi-agent orchestration"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "open_conductor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "open-conductor"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+# Desktop shell
+tauri = { version = "2.12", features = [] }
+tauri-plugin-dialog = "2.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Async, concurrency & errors
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+dashmap = "6"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+# PTY & OS process control
+portable-pty = "0.9"
+which = "8"
+# Local MCP bridge (loopback HTTP) & bridge client
+axum = "0.8"
+ureq = "3"
+# Git watcher & persistence
+notify = "8"
+notify-debouncer-mini = "0.7"
+rusqlite = { version = "0.43", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.32", features = ["signal", "process"] }
+
+[profile.dev]
+incremental = true
+
+[dev-dependencies]
+tempfile = "3"
