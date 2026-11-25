@@ -7,17 +7,36 @@ import type {
   MergeResult,
   NodeStatusEvent,
   OrchestrationGraph,
+  ModelOption,
   RepoMetadata,
   RepoRecord,
   RunEvent,
   RunLogEvent,
   WorktreeInfo,
 } from "../types/orchestration";
+import type { ProviderAuth } from "../types/providers";
+import type { GitHubAccount, GitHubRepoConnection, GitHubRepoSummary } from "../types/github";
+import type { PullRequestStatus, SyncOutcome } from "../types/pulls";
 
 /** Typed wrappers over the Tauri command surface (HANDOFF §6.4). */
 export const ipc = {
+  githubAccountStatus: () => invoke<GitHubAccount>("github_account_status"),
+  githubRepoConnection: (repoPath: string) => invoke<GitHubRepoConnection>("github_repo_connection", { repoPath }),
+  githubListRepositories: () => invoke<GitHubRepoSummary[]>("github_list_repositories"),
+  githubConnectRepository: (repoPath: string, nameWithOwner: string) =>
+    invoke<GitHubRepoConnection>("github_connect_repository", { repoPath, nameWithOwner }),
+  githubStartSignIn: (sessionId: string) => invoke<void>("github_start_sign_in", { sessionId }),
+  listProviderModels: (provider: AgentProvider) => invoke<ModelOption[]>("list_provider_models", { provider }),
+  providerAuthStatus: () => invoke<ProviderAuth[]>("provider_auth_status"),
+  providerStartSignIn: (sessionId: string, provider: string) =>
+    invoke<void>("provider_start_sign_in", { sessionId, provider }),
+  githubCloneRepository: (nameWithOwner: string) => invoke<string>("github_clone_repository", { nameWithOwner }),
+
   openRepository: (path: string) => invoke<RepoMetadata>("open_repository", { path }),
   listRecentRepositories: () => invoke<RepoRecord[]>("list_recent_repositories"),
+  listArchivedRepositories: () => invoke<RepoRecord[]>("list_archived_repositories"),
+  archiveRepository: (path: string, archived: boolean) => invoke<void>("archive_repository", { path, archived }),
+  forgetRepository: (path: string) => invoke<void>("forget_repository", { path }),
   loadGraph: (repoPath: string) => invoke<OrchestrationGraph>("load_graph", { repoPath }),
   saveGraph: (repoPath: string, graph: OrchestrationGraph) => invoke<void>("save_graph", { repoPath, graph }),
 
@@ -28,6 +47,16 @@ export const ipc = {
     invoke<void>("remove_worktree", { repoPath, branchName, folderName }),
   mergeWorktree: (repoPath: string, branchName: string, targetBranch: string, squash: boolean) =>
     invoke<MergeResult>("merge_worktree", { repoPath, branchName, targetBranch, squash }),
+  pullRequestStatus: (worktreePath: string, branch: string) =>
+    invoke<PullRequestStatus | null>("pull_request_status", { worktreePath, branch }),
+  createPullRequest: (worktreePath: string, branch: string, base: string) =>
+    invoke<PullRequestStatus>("create_pull_request", { worktreePath, branch, base }),
+  mergePullRequest: (worktreePath: string, branch: string) =>
+    invoke<PullRequestStatus>("merge_pull_request", { worktreePath, branch }),
+  syncWithBase: (worktreePath: string, branch: string, base: string) =>
+    invoke<SyncOutcome>("sync_with_base", { worktreePath, branch, base }),
+  startAgentTask: (sessionId: string, worktreePath: string, task: "review" | "resolve", base: string) =>
+    invoke<void>("start_agent_task", { sessionId, worktreePath, task, base }),
   getGitDiff: (worktreePath: string) => invoke<FileDiff[]>("get_git_diff", { worktreePath }),
   watchWorkspace: (worktreePath: string) => invoke<string>("watch_workspace", { worktreePath }),
   unwatchWorkspace: (worktreePath: string) => invoke<void>("unwatch_workspace", { worktreePath }),

@@ -1,5 +1,39 @@
 @import "tailwindcss";
 
+/*
+ * Light theme. Components use zinc-* and accent utilities, which Tailwind v4 resolves through --color-* variables
+ * at runtime. Redefining those variables under data-theme="light" flips the UI without touching component markup.
+ * The zinc scale is reversed, and accent text shades are darkened so they stay readable on light surfaces.
+ * The dark theme keeps Tailwind's defaults.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-zinc-50: #09090b;
+  --color-zinc-100: #18181b;
+  --color-zinc-200: #27272a;
+  --color-zinc-300: #3f3f46;
+  --color-zinc-400: #52525b;
+  --color-zinc-500: #71717a;
+  --color-zinc-600: #a1a1aa;
+  --color-zinc-700: #d4d4d8;
+  --color-zinc-800: #e4e4e7;
+  --color-zinc-900: #f4f4f5;
+  --color-zinc-950: #fafafa;
+  --color-red-200: #991b1b;
+  --color-red-300: #b91c1c;
+  --color-red-400: #dc2626;
+  --color-emerald-200: #065f46;
+  --color-emerald-300: #047857;
+  --color-emerald-400: #059669;
+  --color-indigo-300: #4338ca;
+  --color-amber-300: #b45309;
+  --color-sky-300: #0369a1;
+}
+
 html,
 body,
 #root {
@@ -8,8 +42,8 @@ body,
 }
 
 body {
-  background: #09090b;
-  color: #fafafa;
+  background: var(--color-zinc-950);
+  color: var(--color-zinc-50);
   font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
@@ -18,5 +52,74 @@ body {
 /* Keep the webview chrome-like: no text selection on UI chrome, scrollbars subtle. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 transparent;
+  scrollbar-color: var(--color-zinc-700) transparent;
+}
+
+/* Dashes that run along an edge while agents are talking (see FlowEdge). */
+@keyframes oc-flow-out {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+@keyframes oc-flow-back {
+  to {
+    stroke-dashoffset: 16;
+  }
+}
+.oc-flow-out {
+  animation: oc-flow-out 0.6s linear infinite;
+}
+.oc-flow-back {
+  animation: oc-flow-back 0.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .oc-flow-out,
+  .oc-flow-back {
+    animation: none;
+  }
+}
+
+/* Splash screen (see SplashScreen): the tracks draw in, each node lands as its track finishes, then the wordmark rises. */
+@keyframes oc-splash-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes oc-splash-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes oc-splash-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  /* Duration is set inline per track, in proportion to its sweep. */
+  .oc-splash-track {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: oc-splash-draw cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+  .oc-splash-node {
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: oc-splash-pop 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  .oc-splash-rise {
+    opacity: 0;
+    animation: oc-splash-rise 500ms ease-out 650ms both;
+  }
 }

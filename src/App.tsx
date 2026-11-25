@@ -1,40 +1,123 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ipc } from "./lib/ipc";
+import { useConnections } from "./lib/connections";
+import { usePreferences } from "./lib/preferences";
+import { GitHubConnection } from "./components/GitHubConnection";
+import { NewWorkspaceDialog, type DockedSession } from "./components/NewWorkspaceDialog";
+import { OpenRepositoryDialog } from "./components/OpenRepositoryDialog";
 import { OrchestrationCanvas } from "./components/OrchestrationCanvas";
-import { WorkspaceView } from "./components/WorkspaceView";
-import type { RepoMetadata, RepoRecord } from "./types/orchestration";
+import { SettingsView } from "./components/SettingsView";
+import { Sidebar, type ViewMode } from "./components/Sidebar";
+import { SplashScreen } from "./components/SplashScreen";
+import { WorkspaceView, type Session } from "./components/WorkspaceView";
+import type { RepoMetadata, RepoRecord, WorktreeInfo } from "./types/orchestration";
 
-type Mode = "workspaces" | "orchestration";
-
-const MODES: Array<{ id: Mode; label: string; hint: string }> = [
-  { id: "workspaces", label: "Workspaces", hint: "Isolated worktrees, diffs and terminals" },
-  { id: "orchestration", label: "Agent Orchestration", hint: "Railway-style multi-agent topology" },
-];
-
-/** Dual-mode ADE shell: a repository sidebar plus the Workspaces or Orchestration surface. */
+/** Dual-mode ADE shell: a sidebar with the views, repositories and settings, plus the Workspaces or Orchestration surface. */
 export default function App() {
-  const [mode, setMode] = useState<Mode>("workspaces");
+  const [mode, setMode] = useState<ViewMode>("workspaces");
   const [repo, setRepo] = useState<RepoMetadata | null>(null);
   const [recent, setRecent] = useState<RepoRecord[]>([]);
+  const [archived, setArchived] = useState<RepoRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [openingRepo, setOpeningRepo] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Workspaces per repository, for the sidebar groups.
+  const [worktrees, setWorktrees] = useState<Record<string, WorktreeInfo[]>>({});
+  const requested = useRef(new Set<string>());
+  // The selected workspace of the open repository, or `null` for its main checkout.
+  const [activeWorktreePath, setActiveWorktreePath] = useState<string | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [creatingFor, setCreatingFor] = useState<string | null>(null);
+  const connections = useConnections();
+  const { preferences, update: updatePreferences } = usePreferences();
 
-  useEffect(() => {
-    ipc
-      .listRecentRepositories()
-      .then(setRecent)
-      .catch(() => undefined);
+  const loadWorktrees = useCallback(async (path: string): Promise<WorktreeInfo[]> => {
+    try {
+      const list = await ipc.listWorktrees(path);
+      setWorktrees((current) => ({ ...current, [path]: list }));
+      return list;
+    } catch {
+      // A repository that moved or was deleted shows an empty group instead of failing the sidebar.
+      setWorktrees((current) => ({ ...current, [path]: [] }));
+      return [];
+    }
   }, []);
 
-  const openPath = async (path: string) => {
+  // Load each repository's workspaces once, the first time it appears in the list.
+  useEffect(() => {
+    for (const item of recent) {
+      if (requested.current.has(item.path)) continue;
+      requested.current.add(item.path);
+      void loadWorktrees(item.path);
+    }
+  }, [recent, loadWorktrees]);
+
+  const refreshLists = async () => {
+    const [next, past] = await Promise.all([ipc.listRecentRepositories(), ipc.listArchivedRepositories()]);
+    setRecent(next);
+    setArchived(past);
+  };
+
+  useEffect(() => {
+    void refreshLists().catch(() => undefined);
+  }, []);
+
+  const archiveRepo = async (path: string, value: boolean) => {
     try {
-      const metadata = await ipc.openRepository(path);
-      setRepo(metadata);
-      setError(null);
-      setRecent(await ipc.listRecentRepositories());
+      await ipc.archiveRepository(path, value);
+      if (value && repo?.path === path) setRepo(null);
+      await refreshLists();
     } catch (err) {
       setError(String(err));
     }
+  };
+
+  const removeRepo = async (path: string) => {
+    try {
+      await ipc.forgetRepository(path);
+      if (repo?.path === path) setRepo(null);
+      await refreshLists();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  /** Opens a checkout. Resolves to an error message, or `null` when the repository opened. */
+  const openPath = async (path: string): Promise<string | null> => {
+    try {
+      const metadata = await ipc.openRepository(path);
+      setRepo(metadata);
+      setActiveWorktreePath(null);
+      setSettingsOpen(false);
+      setError(null);
+      await refreshLists();
+      void loadWorktrees(metadata.path);
+      return null;
+    } catch (err) {
+      setError(String(err));
+      return String(err);
+    }
+  };
+
+  /** Selects a workspace in the sidebar, opening its repository first when another one is open. */
+  const selectWorktree = async (repoPath: string, worktreePath: string) => {
+    if (repo?.path !== repoPath) {
+      const failure = await openPath(repoPath);
+      if (failure !== null) return;
+    }
+    setActiveWorktreePath(worktreePath);
+    setSettingsOpen(false);
+  };
+
+  const workspaceCreated = async (repoPath: string, info: WorktreeInfo) => {
+    await loadWorktrees(repoPath);
+    await selectWorktree(repoPath, info.path);
+  };
+
+  const closeNewWorkspace = (docked: DockedSession | null) => {
+    setCreatingFor(null);
+    if (docked) setSession(docked);
   };
 
   const pickRepository = async () => {
@@ -44,42 +127,34 @@ export default function App() {
 
   return (
     <div className="flex h-full bg-zinc-950 text-zinc-100">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/60">
-        <div className="border-b border-zinc-800 px-4 py-3.5">
-          <div className="text-sm font-semibold tracking-tight">OpenConductor</div>
-          <div className="text-[11px] text-zinc-500">Agentic development environment</div>
-        </div>
-        <div className="p-3">
-          <button
-            type="button"
-            onClick={() => void pickRepository()}
-            className="w-full rounded-md bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-zinc-700"
-          >
-            Open repository…
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          <div className="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Recent</div>
-          {recent.length === 0 ? <div className="px-2 text-xs text-zinc-600">No repositories yet.</div> : null}
-          <ul className="space-y-0.5">
-            {recent.map((item) => (
-              <li key={item.path}>
-                <button
-                  type="button"
-                  onClick={() => void openPath(item.path)}
-                  className={`w-full truncate rounded-md px-2 py-1.5 text-left text-xs ${
-                    repo?.path === item.path ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/60"
-                  }`}
-                  title={item.path}
-                >
-                  {item.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </aside>
+      <Sidebar
+        mode={mode}
+        onModeChange={(next) => {
+          setMode(next);
+          setSettingsOpen(false);
+        }}
+        activePath={repo?.path ?? null}
+        activeWorktreePath={activeWorktreePath}
+        recent={recent}
+        archived={archived}
+        worktrees={worktrees}
+        onSelectWorktree={(repoPath, worktreePath) => void selectWorktree(repoPath, worktreePath)}
+        onCreateWorkspace={setCreatingFor}
+        settingsActive={settingsOpen}
+        onOpenSettings={() => setSettingsOpen(true)}
+        connections={connections}
+        onArchive={(path, value) => void archiveRepo(path, value)}
+        onRemove={(path) => void removeRepo(path)}
+        onOpenRepository={() => setOpeningRepo(true)}
+        preferences={preferences}
+        onPreferencesChange={updatePreferences}
+      />
 
+      {settingsOpen ? (
+        <main className="min-w-0 flex-1">
+          <SettingsView connections={connections} />
+        </main>
+      ) : (
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/40 px-4 py-2">
           <div className="min-w-0">
@@ -91,21 +166,7 @@ export default function App() {
               </div>
             ) : null}
           </div>
-          <nav className="ml-auto flex rounded-lg border border-zinc-800 bg-zinc-950 p-0.5" aria-label="Views">
-            {MODES.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                title={item.hint}
-                onClick={() => setMode(item.id)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  mode === item.id ? "bg-zinc-800 text-zinc-100 shadow" : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </nav>
+          <GitHubConnection repoPath={repo?.path ?? null} />
         </header>
 
         {error ? (
@@ -122,19 +183,50 @@ export default function App() {
               </p>
               <button
                 type="button"
-                onClick={() => void pickRepository()}
+                onClick={() => setOpeningRepo(true)}
                 className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
               >
                 Open repository…
               </button>
             </div>
           ) : mode === "workspaces" ? (
-            <WorkspaceView key={repo.path} repoPath={repo.path} />
+            <WorkspaceView
+              key={repo.path}
+              repoPath={repo.path}
+              worktrees={worktrees[repo.path] ?? []}
+              activePath={activeWorktreePath}
+              onSelect={setActiveWorktreePath}
+              onWorktreesChanged={() => loadWorktrees(repo.path)}
+              session={session}
+              onSessionChange={setSession}
+            />
           ) : (
             <OrchestrationCanvas key={repo.path} repoPath={repo.path} />
           )}
         </div>
       </main>
+      )}
+
+      {creatingFor ? (
+        <NewWorkspaceDialog
+          repoPath={creatingFor}
+          onCreated={(info) => void workspaceCreated(creatingFor, info)}
+          onClose={closeNewWorkspace}
+        />
+      ) : null}
+
+      {openingRepo ? (
+        <OpenRepositoryDialog
+          onOpenPath={openPath}
+          onChooseLocal={() => {
+            setOpeningRepo(false);
+            void pickRepository();
+          }}
+          onClose={() => setOpeningRepo(false)}
+        />
+      ) : null}
+
+      <SplashScreen />
     </div>
   );
 }
