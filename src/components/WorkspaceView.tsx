@@ -1,58 +1,87 @@
 import { useCallback, useEffect, useState } from "react";
+import { LAUNCHERS } from "./NewWorkspaceDialog";
 import { TerminalPane } from "./TerminalPane";
 import { DiffDetail, FileList } from "./DiffViewer";
 import { events, ipc, newSessionId } from "../lib/ipc";
 import type { AgentProvider, FileDiff, WorktreeInfo } from "../types/orchestration";
+import type { PullRequestStatus } from "../types/pulls";
+import { BASE_BRANCH, pullButton, type PullAction, type PullButton } from "../lib/pullRequest";
 
 type Notice = { tone: "info" | "error"; text: string };
-type Session = { id: string; cwd: string; label: string };
+export type Session = { id: string; cwd: string; label: string };
 
-const LAUNCHERS: Array<{ id: AgentProvider | "shell"; label: string }> = [
-  { id: "shell", label: "Shell" },
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-  { id: "gemini", label: "Gemini" },
-  { id: "opencode", label: "OpenCode" },
-];
+/** How often the selected workspace's PR is re-read, since mergeability and checks change on GitHub. */
+const PR_POLL_MS = 20_000;
 
-const FIELD =
-  "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-indigo-500";
+const PULL_TONES: Record<PullButton["tone"], string> = {
+  primary: "bg-indigo-600 text-white",
+  success: "bg-emerald-600 text-white",
+  warning: "bg-amber-600 text-white",
+  danger: "bg-red-600 text-white",
+  muted: "bg-zinc-800 text-zinc-300",
+};
+
+/** The PR button. It only does something when the state has an action (create, resolve or merge). */
+function PullActionButton({
+  button,
+  busy,
+  onAction,
+}: {
+  button: PullButton;
+  busy: boolean;
+  onAction: (action: PullAction) => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={button.hint}
+      disabled={busy || button.action === null}
+      onClick={() => {
+        if (button.action) onAction(button.action);
+      }}
+      className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition enabled:hover:brightness-110 disabled:cursor-default disabled:opacity-70 ${PULL_TONES[button.tone]}`}
+    >
+      {button.label}
+    </button>
+  );
+}
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
-/** Worktree launcher, diff review, merge/remove, and a PTY terminal scoped to the workspace. */
-export function WorkspaceView({ repoPath }: { repoPath: string }) {
-  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
-  const [activePath, setActivePath] = useState<string | null>(null);
+type Props = {
+  repoPath: string;
+  /** The repository's worktrees. The sidebar lists them; this view works on the selected one. */
+  worktrees: WorktreeInfo[];
+  /** The selected worktree path, or `null` to use the main checkout. */
+  activePath: string | null;
+  onSelect: (path: string | null) => void;
+  /** Reloads the worktree list after a merge or removal and returns the fresh list. */
+  onWorktreesChanged: () => Promise<WorktreeInfo[]>;
+  session: Session | null;
+  onSessionChange: (session: Session | null) => void;
+};
+
+/** Diff review, merge/remove, and a PTY terminal scoped to the selected workspace. */
+export function WorkspaceView({
+  repoPath,
+  worktrees,
+  activePath: selectedPath,
+  onSelect,
+  onWorktreesChanged,
+  session,
+  onSessionChange,
+}: Props) {
+  const activePath = selectedPath ?? worktrees.find((wt) => wt.isMain)?.path ?? worktrees[0]?.path ?? null;
   const [files, setFiles] = useState<FileDiff[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [branchName, setBranchName] = useState("");
-  const [folderName, setFolderName] = useState("");
-  const [mergeTarget, setMergeTarget] = useState("main");
-  const [squash, setSquash] = useState(true);
+  // `undefined` until the first read of the branch's PR finishes. `null` means the branch has no PR yet.
+  const [pr, setPr] = useState<PullRequestStatus | null | undefined>(undefined);
+  const [prError, setPrError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
-
-  const refreshWorktrees = useCallback(async (): Promise<WorktreeInfo[]> => {
-    try {
-      const list = await ipc.listWorktrees(repoPath);
-      setWorktrees(list);
-      return list;
-    } catch (error) {
-      setNotice({ tone: "error", text: String(error) });
-      return [];
-    }
-  }, [repoPath]);
-
-  useEffect(() => {
-    void refreshWorktrees().then((list) => {
-      setActivePath((current) => current ?? list.find((wt) => wt.isMain)?.path ?? list[0]?.path ?? null);
-    });
-  }, [refreshWorktrees]);
 
   const loadDiff = useCallback(async (path: string) => {
     try {
@@ -89,25 +118,6 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
 
   const activeWorktree = worktrees.find((wt) => wt.path === activePath);
 
-  const createWorkspace = async () => {
-    const branch = branchName.trim();
-    if (!branch) return;
-    const folder = folderName.trim() || branch.replace(/[^A-Za-z0-9._-]+/g, "-");
-    setBusy(true);
-    try {
-      const info = await ipc.createWorktree(repoPath, branch, folder);
-      setBranchName("");
-      setFolderName("");
-      await refreshWorktrees();
-      setActivePath(info.path);
-      setNotice({ tone: "info", text: `Workspace "${branch}" created in .worktrees/${folder}` });
-    } catch (error) {
-      setNotice({ tone: "error", text: String(error) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const removeWorkspace = async (worktree: WorktreeInfo) => {
     if (!confirmRemove) {
       setConfirmRemove(true);
@@ -116,8 +126,8 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
     setBusy(true);
     try {
       await ipc.removeWorktree(repoPath, worktree.branch ?? "", basename(worktree.path));
-      const list = await refreshWorktrees();
-      setActivePath(list.find((wt) => wt.isMain)?.path ?? null);
+      const list = await onWorktreesChanged();
+      onSelect(list.find((wt) => wt.isMain)?.path ?? null);
       setNotice({ tone: "info", text: "Workspace removed. Its branch was kept unless it was fully merged." });
     } catch (error) {
       setNotice({ tone: "error", text: String(error) });
@@ -127,18 +137,79 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
     }
   };
 
-  const mergeWorkspace = async (worktree: WorktreeInfo) => {
-    if (!worktree.branch) return;
+  const activeBranch = activeWorktree && !activeWorktree.isMain ? activeWorktree.branch : null;
+
+  // GitHub's mergeability and checks change without any local event, so keep the PR state fresh
+  // while this workspace is selected.
+  useEffect(() => {
+    setPr(undefined);
+    setPrError(null);
+    if (!activePath || !activeBranch) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await ipc.pullRequestStatus(activePath, activeBranch);
+        if (!cancelled) {
+          setPr(next);
+          setPrError(null);
+          // A merged PR never changes again, so stop spawning `gh` for it.
+          if (next?.state === "MERGED") return;
+        }
+      } catch (error) {
+        if (!cancelled) setPrError(String(error));
+      }
+      if (!cancelled) timer = window.setTimeout(() => void poll(), PR_POLL_MS);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activePath, activeBranch]);
+
+  /** Runs whatever the PR button currently offers: create the PR, resolve conflicts, or merge. */
+  const runPullAction = async (action: PullAction) => {
+    if (!activePath || !activeBranch) return;
     setBusy(true);
     try {
-      const result = await ipc.mergeWorktree(repoPath, worktree.branch, mergeTarget.trim(), squash);
-      const conflicts = result.conflicts.length > 0 ? ` Conflicts: ${result.conflicts.join(", ")}.` : "";
-      setNotice({ tone: result.merged ? "info" : "error", text: `${result.message}${conflicts}` });
-      if (result.merged) await refreshWorktrees();
+      if (action === "create") {
+        const created = await ipc.createPullRequest(activePath, activeBranch, BASE_BRANCH);
+        setPr(created);
+        setNotice({ tone: "info", text: `Opened PR #${created.number}. Merge unlocks when the checks pass.` });
+      } else if (action === "merge") {
+        const merged = await ipc.mergePullRequest(activePath, activeBranch);
+        setPr(merged);
+        setNotice({ tone: "info", text: `Merged PR #${merged.number} into ${BASE_BRANCH}.` });
+      } else {
+        const outcome = await ipc.syncWithBase(activePath, activeBranch, BASE_BRANCH);
+        if (outcome.conflicts.length > 0) {
+          // Hand the conflicts to Claude in this workspace. The next Resolve press commits and pushes.
+          const id = newSessionId();
+          await ipc.startAgentTask(id, activePath, "resolve", BASE_BRANCH);
+          onSessionChange({ id, cwd: activePath, label: "Resolve" });
+          setNotice({ tone: "error", text: `${outcome.message} Conflicts: ${outcome.conflicts.join(", ")}.` });
+        } else {
+          setNotice({ tone: "info", text: outcome.message });
+        }
+        setPr(await ipc.pullRequestStatus(activePath, activeBranch));
+      }
     } catch (error) {
       setNotice({ tone: "error", text: String(error) });
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** Opens Claude in this workspace on a review of the branch against the base. */
+  const startReview = async () => {
+    if (!activePath) return;
+    const id = newSessionId();
+    try {
+      await ipc.startAgentTask(id, activePath, "review", BASE_BRANCH);
+      onSessionChange({ id, cwd: activePath, label: "Review" });
+    } catch (error) {
+      setNotice({ tone: "error", text: String(error) });
     }
   };
 
@@ -148,7 +219,7 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
     const label = LAUNCHERS.find((item) => item.id === provider)?.label ?? provider;
     try {
       await ipc.spawnAgentPty(id, activePath, provider, 120, 30);
-      setSession({ id, cwd: activePath, label });
+      onSessionChange({ id, cwd: activePath, label });
     } catch (error) {
       setNotice({ tone: "error", text: String(error) });
     }
@@ -158,61 +229,6 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
 
   return (
     <div className="flex h-full min-h-0">
-      <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/50">
-        <div className="space-y-2 border-b border-zinc-800 p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">New workspace</div>
-          <input
-            value={branchName}
-            onChange={(e) => setBranchName(e.target.value)}
-            placeholder="branch, e.g. feature/dark-mode"
-            className={FIELD}
-            onKeyDown={(e) => e.key === "Enter" && void createWorkspace()}
-          />
-          <input
-            value={folderName}
-            onChange={(e) => setFolderName(e.target.value)}
-            placeholder="folder (optional)"
-            className={FIELD}
-          />
-          <button
-            type="button"
-            onClick={() => void createWorkspace()}
-            disabled={busy || !branchName.trim()}
-            className="w-full rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
-          >
-            Create worktree
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          <div className="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Workspaces</div>
-          <ul className="space-y-0.5">
-            {worktrees.map((worktree) => {
-              const active = worktree.path === activePath;
-              return (
-                <li key={worktree.path}>
-                  <button
-                    type="button"
-                    onClick={() => setActivePath(worktree.path)}
-                    className={`w-full rounded-md px-2.5 py-2 text-left ${active ? "bg-zinc-800" : "hover:bg-zinc-800/60"}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${worktree.isMain ? "bg-emerald-400" : "bg-indigo-400"}`} />
-                      <span className="truncate text-xs font-medium text-zinc-100">
-                        {worktree.branch ?? `detached ${worktree.head.slice(0, 8)}`}
-                      </span>
-                      {worktree.isMain ? <span className="ml-auto text-[10px] text-zinc-500">main</span> : null}
-                    </div>
-                    <div className="mt-0.5 truncate pl-3.5 font-mono text-[10px] text-zinc-500" title={worktree.path}>
-                      {worktree.isMain ? worktree.path : `.worktrees/${basename(worktree.path)}`}
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      </aside>
-
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2.5">
           <div className="min-w-0">
@@ -222,26 +238,28 @@ export function WorkspaceView({ repoPath }: { repoPath: string }) {
             <div className="truncate font-mono text-[11px] text-zinc-500">{activePath}</div>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            {activeWorktree && !activeWorktree.isMain && activeWorktree.branch ? (
+            {activeWorktree && activeBranch ? (
               <>
-                <input
-                  value={mergeTarget}
-                  onChange={(e) => setMergeTarget(e.target.value)}
-                  className={`${FIELD} w-28`}
-                  aria-label="Merge target branch"
-                />
-                <label className="flex items-center gap-1 text-[11px] text-zinc-400">
-                  <input type="checkbox" checked={squash} onChange={(e) => setSquash(e.target.checked)} className="accent-indigo-500" />
-                  squash
-                </label>
+                {pr ? (
+                  <span className="text-[11px] text-zinc-500" title={pr.url}>
+                    PR #{pr.number}
+                  </span>
+                ) : null}
+                {prError ? (
+                  <span className="text-[11px] text-red-300" title={prError}>
+                    PR status unavailable
+                  </span>
+                ) : null}
                 <button
                   type="button"
-                  onClick={() => void mergeWorkspace(activeWorktree)}
-                  disabled={busy}
+                  onClick={() => void startReview()}
+                  disabled={!activePath}
+                  title={`Open Claude on a review of this branch against ${BASE_BRANCH}`}
                   className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
                 >
-                  Merge
+                  Review
                 </button>
+                <PullActionButton button={pullButton(pr)} busy={busy} onAction={(action) => void runPullAction(action)} />
                 <button
                   type="button"
                   onClick={() => void removeWorkspace(activeWorktree)}
