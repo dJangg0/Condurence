@@ -445,6 +445,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
               edge={selectedEdge}
               sourceName={nameOf(selectedEdge.source)}
               targetName={nameOf(selectedEdge.target)}
+              targetWorktreeMode={nodes.find((node) => node.id === selectedEdge.target)?.data.worktreeMode ?? "isolated"}
               onChange={(patch) => updateEdge(selectedEdge.id, patch)}
               onDelete={() => deleteEdge(selectedEdge.id)}
             />

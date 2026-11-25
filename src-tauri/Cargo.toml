@@ -33,7 +33,7 @@ portable-pty = "0.9"
 which = "8"
 # Local MCP bridge (loopback HTTP) & bridge client
 axum = "0.8"
-ureq = "3"
+ureq = { version = "3", default-features = false } # bridge talks plain HTTP to 127.0.0.1 only
 # Git watcher & persistence
 notify = "8"
 notify-debouncer-mini = "0.7"

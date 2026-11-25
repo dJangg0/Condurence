@@ -210,8 +210,6 @@ pub struct Invocation {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
-    /// Typed into a TUI shortly after launch, for providers without a prompt flag.
-    pub initial_input: Option<String>,
 }
 
 fn bridge_args(bridge: &BridgeAddress) -> Vec<String> {
@@ -274,7 +272,6 @@ pub fn invocation(
                 program: provider.binary().into(),
                 args,
                 env: vec![],
-                initial_input: None,
             })
         }
         AgentProvider::Codex => {
@@ -303,18 +300,15 @@ pub fn invocation(
                 program: provider.binary().into(),
                 args,
                 env: vec![],
-                initial_input: None,
             })
         }
         AgentProvider::Gemini => {
-            // Gemini reads MCP servers from ~/.gemini/settings.json; point its home at an
-            // ephemeral directory so the user's own configuration is left untouched.
+            // GEMINI_CLI_HOME relocates the whole Gemini home, including the OAuth account and
+            // trust files. The ephemeral home links the user's real entries and only carries its
+            // own settings.json, so the user's sign-in keeps working inside the child.
             let home = run_dir.join(format!("{stem}-home"));
-            std::fs::create_dir_all(home.join(".gemini"))?;
-            std::fs::write(
-                home.join(".gemini").join("settings.json"),
-                serde_json::to_string_pretty(&json!({ "mcpServers": { SERVER_KEY: server } }))?,
-            )?;
+            let user_gemini = crate::runtime::home_dir().map(|dir| dir.join(".gemini"));
+            prepare_gemini_home(&home.join(".gemini"), user_gemini.as_deref(), &server)?;
             let full = join_prompt(system, prompt);
             let mut args = Vec::new();
             match mode {
@@ -327,15 +321,19 @@ pub fn invocation(
                     args.extend(["-p".into(), full, "--approval-mode".into(), "auto_edit".into()]);
                 }
             }
+            // Gemini hides every MCP server in untrusted folders, and a fresh worktree is one.
+            // The user chose this workspace through the topology, so trust it for the session.
+            args.push("--skip-trust".into());
             push_model(&mut args, model, "-m");
             Ok(Invocation {
                 program: provider.binary().into(),
                 args,
                 env: vec![("GEMINI_CLI_HOME".into(), home.to_string_lossy().into_owned())],
-                initial_input: None,
             })
         }
         AgentProvider::Opencode => {
+            // OPENCODE_CONFIG is merged on top of the user's own configuration, so their
+            // providers and credentials stay in effect.
             let config = run_dir.join(format!("{stem}.json"));
             let server_local = json!({
                 "type": "local",
@@ -351,26 +349,78 @@ pub fn invocation(
             )?;
             let full = join_prompt(system, prompt);
             let env = vec![("OPENCODE_CONFIG".into(), config.to_string_lossy().into_owned())];
+            let mut args = Vec::new();
             match mode {
-                Mode::Interactive => Ok(Invocation {
-                    program: provider.binary().into(),
-                    args: vec![],
-                    env,
-                    initial_input: (!full.is_empty()).then_some(full),
-                }),
-                Mode::Headless => {
-                    let mut args = vec!["run".into(), full];
-                    push_model(&mut args, model, "-m");
-                    Ok(Invocation {
-                        program: provider.binary().into(),
-                        args,
-                        env,
-                        initial_input: None,
-                    })
+                Mode::Interactive => {
+                    if !full.is_empty() {
+                        args.extend(["--prompt".into(), full]);
+                    }
                 }
+                Mode::Headless => {
+                    args.extend(["run".into(), full]);
+                }
+            }
+            push_model(&mut args, model, "-m");
+            if mode == Mode::Headless {
+                // --auto: a headless child has no operator to answer permission prompts.
+                args.push("--auto".into());
+            }
+            Ok(Invocation {
+                program: provider.binary().into(),
+                args,
+                env,
+            })
+        }
+    }
+}
+
+/// Builds the ephemeral `.gemini` directory for one Gemini instance. Every entry of the user's
+/// real directory is symlinked (credentials are shared, never copied) except settings.json,
+/// which is merged with the orchestrator's MCP server.
+pub fn prepare_gemini_home(target: &Path, user_dir: Option<&Path>, server: &Value) -> AppResult<()> {
+    std::fs::create_dir_all(target)?;
+    let mut settings = json!({});
+    if let Some(user_dir) = user_dir {
+        if let Ok(entries) = std::fs::read_dir(user_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name == "settings.json" {
+                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                        settings = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
+                    }
+                    continue;
+                }
+                link_into(&entry.path(), &target.join(&name))?;
             }
         }
     }
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    let mut servers = settings
+        .get("mcpServers")
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    servers[SERVER_KEY] = server.clone();
+    settings["mcpServers"] = servers;
+    std::fs::write(target.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link_into(source: &Path, link: &Path) -> AppResult<()> {
+    if std::fs::symlink_metadata(link).is_err() {
+        std::os::unix::fs::symlink(source, link)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_into(_source: &Path, _link: &Path) -> AppResult<()> {
+    // Windows symlinks need extra privileges. Without them the child starts signed out of
+    // Gemini; this is a documented limitation rather than a silent copy of credentials.
+    Ok(())
 }
 
 fn push_model(args: &mut Vec<String>, model: &str, flag: &str) {
@@ -434,6 +484,75 @@ mod tests {
         let config = dir.path().join("senior-dev.1.claude-mcp.json");
         let json: Value = serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
         assert_eq!(json["mcpServers"]["openconductor"]["args"][0], "--mcp-bridge");
+    }
+
+    #[test]
+    fn opencode_modes_use_documented_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/bin/openconductor");
+        let bridge = BridgeAddress {
+            exe: &exe,
+            port: 4000,
+            run_id: "run1",
+            instance_id: "senior-dev.1",
+            token: "t",
+        };
+        let headless = invocation(AgentProvider::Opencode, Mode::Headless, "anthropic/sonnet", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert_eq!(headless.args[0], "run");
+        assert!(headless.args.contains(&"--auto".to_string()), "headless runs must auto-approve");
+        assert!(headless.env.iter().any(|(key, _)| key == "OPENCODE_CONFIG"));
+
+        let interactive = invocation(AgentProvider::Opencode, Mode::Interactive, "", "SYS", "goal", &bridge, dir.path()).unwrap();
+        assert_eq!(interactive.args[0], "--prompt");
+        assert!(!interactive.args.contains(&"--auto".to_string()));
+    }
+
+    #[test]
+    fn gemini_runs_trust_the_worktree_so_mcp_servers_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/bin/openconductor");
+        let bridge = BridgeAddress {
+            exe: &exe,
+            port: 4000,
+            run_id: "run1",
+            instance_id: "senior-dev.1",
+            token: "t",
+        };
+        for mode in [Mode::Headless, Mode::Interactive] {
+            let inv = invocation(AgentProvider::Gemini, mode, "", "SYS", "do it", &bridge, dir.path()).unwrap();
+            assert!(inv.args.contains(&"--skip-trust".to_string()), "{mode:?} must pass --skip-trust");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gemini_home_links_credentials_and_merges_mcp_settings() {
+        let user = tempfile::tempdir().unwrap();
+        let user_gemini = user.path().join(".gemini");
+        std::fs::create_dir_all(&user_gemini).unwrap();
+        std::fs::write(user_gemini.join("google_accounts.json"), r#"{"active":"me@example.com"}"#).unwrap();
+        std::fs::write(
+            user_gemini.join("settings.json"),
+            r#"{"model":{"name":"gemini-x"},"mcpServers":{"other":{"command":"other-tool"}}}"#,
+        )
+        .unwrap();
+
+        let run = tempfile::tempdir().unwrap();
+        let target = run.path().join("home").join(".gemini");
+        let server = json!({ "command": "/bin/openconductor", "args": ["--mcp-bridge"] });
+        prepare_gemini_home(&target, Some(&user_gemini), &server).unwrap();
+
+        // Credentials are linked, not copied, so token refreshes land in the user's real file.
+        let linked = std::fs::symlink_metadata(target.join("google_accounts.json")).unwrap();
+        assert!(linked.file_type().is_symlink());
+        assert!(std::fs::read_to_string(target.join("google_accounts.json")).unwrap().contains("me@example.com"));
+
+        // Settings are a merged copy: the user's keys survive and the orchestrator is added.
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(target.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["model"]["name"], "gemini-x");
+        assert_eq!(settings["mcpServers"]["other"]["command"], "other-tool");
+        assert_eq!(settings["mcpServers"][SERVER_KEY]["command"], "/bin/openconductor");
+        assert!(!std::fs::symlink_metadata(target.join("settings.json")).unwrap().file_type().is_symlink());
     }
 
     #[test]

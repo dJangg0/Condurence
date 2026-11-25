@@ -31,8 +31,6 @@ use crate::runtime::{events::EventSink, now_ms, state_db::StateDb};
 const PROTOCOL_VERSION: &str = "2025-06-18";
 /// After a child reports, how long it may keep running before we terminate it.
 const REPORT_GRACE: Duration = Duration::from_secs(10);
-/// Interactive TUIs need a moment before they accept typed input.
-const TUI_WARMUP: Duration = Duration::from_millis(2500);
 const SUMMARY_TAIL_CHARS: usize = 4000;
 const TERM_COLS: u16 = 120;
 const TERM_ROWS: u16 = 36;
@@ -506,13 +504,6 @@ impl Router {
         })?;
         *lock(&instance.session) = Some(session_id);
 
-        if let Some(text) = invocation.initial_input {
-            let typed = session.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(TUI_WARMUP).await;
-                let _ = typed.write(format!("{text}\r").as_bytes());
-            });
-        }
         Ok(session)
     }
 

@@ -50,7 +50,9 @@ Each delegated handoff runs headless in a visible PTY with an injected `report_t
 
 ## Status and known limits
 
-- **Windows:** the code is written but not compiled or run on Windows here. Process-tree teardown uses `taskkill /T` rather than Job Objects, and `.cmd` shims are launched through `cmd.exe`.
-- **Provider adapters:** the Claude and Codex flags were checked against the installed CLIs' `--help`. The Gemini and OpenCode adapters are unverified because those CLIs are not installed here. Live runs against authenticated subscriptions were not performed.
+- **Provider adapters:** flags for Claude, Codex, Gemini and OpenCode were checked against each CLI's `--help` output and, for the environment variables, against the CLI sources. No live run against an authenticated subscription has been done yet.
+- **Permissions in delegated runs:** headless Claude uses `--permission-mode acceptEdits`, so shell commands such as test runs may be denied. Headless OpenCode uses `--auto`, which auto-approves every permission request. Worktree isolation limits the blast radius, but this is a real trust decision.
+- **Gemini sign-in:** `GEMINI_CLI_HOME` relocates the whole Gemini home. The ephemeral home therefore symlinks your real `~/.gemini` entries and only writes its own `settings.json`. On Windows symlinks need extra privileges, so delegated Gemini runs there start signed out.
+- **Windows:** not yet compiled for Windows. Process-tree teardown uses `taskkill /T` rather than Job Objects, and `.cmd` shims are launched through `cmd.exe`.
 - **Escalation:** the root orchestrator is interactive, so `escalates_to` into the root starts a fresh headless instance of the root's provider with the escalation context.
 - **Merging:** squash-merged branches are not ancestors of their target, so `git branch -d` keeps them. Removing a workspace therefore never discards unmerged work.

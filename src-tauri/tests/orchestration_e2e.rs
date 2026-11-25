@@ -5,6 +5,9 @@
 //! Covers: delegation and structured result return, the isolated child worktree, the
 //! maxRetries budget, the approval gate (approve and reject), and token enforcement.
 
+// Runs a Python test double as the provider CLI, so it is Unix-only.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};

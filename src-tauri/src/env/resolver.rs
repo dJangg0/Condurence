@@ -7,11 +7,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(any(unix, test))]
 const BEGIN: &str = "__OC_ENV_BEGIN__";
+#[cfg(any(unix, test))]
 const END: &str = "__OC_ENV_END__";
 /// Shell-local variables that must not be copied into child processes.
 const SHELL_LOCAL: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_"];
@@ -116,6 +121,7 @@ fn fallback_dirs(env: &HashMap<String, String>) -> Vec<PathBuf> {
 
 /// Extracts the `env` output printed between our sentinel markers. Values may
 /// span multiple lines, so continuation lines are appended to the last key.
+#[cfg(any(unix, test))]
 fn parse_env_block(text: &str) -> Option<HashMap<String, String>> {
     let mut lines = text.lines();
     lines.by_ref().find(|line| *line == BEGIN)?;
@@ -148,6 +154,7 @@ fn parse_env_block(text: &str) -> Option<HashMap<String, String>> {
     }
 }
 
+#[cfg(any(unix, test))]
 fn is_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     match chars.next() {

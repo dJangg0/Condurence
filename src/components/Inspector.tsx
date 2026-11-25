@@ -132,12 +132,15 @@ export function EdgeInspector({
   edge,
   sourceName,
   targetName,
+  targetWorktreeMode,
   onChange,
   onDelete,
 }: {
   edge: RoutingFlowEdge;
   sourceName: string;
   targetName: string;
+  /** Isolation is a property of the target node (graph schema §6.1); shown here for context. */
+  targetWorktreeMode: WorktreeMode;
   onChange: (patch: Partial<RoutingFlowEdge["data"] & object>) => void;
   onDelete: () => void;
 }) {
@@ -187,6 +190,14 @@ export function EdgeInspector({
           onChange={(e) => onChange({ maxRetries: Number.parseInt(e.target.value, 10) || 0 })}
         />
       </Field>
+
+      <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3 text-xs leading-relaxed text-zinc-400">
+        <span className="font-medium text-zinc-300">{targetName} runs in: </span>
+        {targetWorktreeMode === "isolated"
+          ? "an isolated child worktree, branched from the caller's last commit."
+          : "the caller's shared worktree, so edits are visible live."}
+        <span className="mt-1 block text-zinc-500">Change this on the target node under Worktree isolation.</span>
+      </div>
 
       <label className="flex items-start gap-2.5 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
         <input
