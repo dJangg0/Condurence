@@ -24,6 +24,7 @@ const sample: OrchestrationGraph = {
         role: "Primary Orchestrator",
         provider: "claude",
         model: "opus",
+        effort: "low",
         skills: ["spec-planner"],
         contextPaths: ["AGENTS.md"],
         systemPrompt: "Decompose.",
@@ -40,6 +41,7 @@ const sample: OrchestrationGraph = {
         role: "Implementation",
         provider: "claude",
         model: "sonnet",
+        effort: "",
         skills: [],
         contextPaths: [],
         systemPrompt: "",
@@ -85,6 +87,18 @@ describe("graph conversion", () => {
     const gated = edgePresentation({ relationType: "escalates_to", maxRetries: 1, requiresApproval: true });
     expect(gated.style?.stroke).toBe("#f59e0b");
     expect(String(gated.label)).toContain("approval");
+  });
+});
+
+describe("reasoning effort", () => {
+  it("survives the canvas round trip and is validated", () => {
+    const flow = toFlow(sample);
+    expect(flow.nodes[0].data.effort).toBe("low");
+    expect(fromFlow(flow.nodes, flow.edges, "isolated").nodes[0].data.effort).toBe("low");
+
+    const broken = structuredClone(sample);
+    broken.nodes[0].data.effort = "turbo";
+    expect(validateGraph(broken)).toContain('Node "ceo" has unknown effort "turbo".');
   });
 });
 

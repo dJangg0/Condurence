@@ -1,13 +1,17 @@
-//! OpenConductor core: repo/worktree management, PTY sessions, structured diffs and the
+//! Condurence core: repo/worktree management, PTY sessions, structured diffs and the
 //! MCP router that turns a canvas topology into live multi-agent execution.
 
+pub mod auth;
 pub mod env;
 pub mod error;
 pub mod git;
+pub mod github;
 pub mod graph;
 pub mod ipc;
 pub mod mcp;
+pub mod models;
 pub mod pty;
+pub mod pulls;
 pub mod runtime;
 
 use std::sync::Arc;
@@ -37,6 +41,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::commands::open_repository,
             ipc::commands::list_recent_repositories,
+            ipc::commands::list_archived_repositories,
+            ipc::commands::archive_repository,
+            ipc::commands::forget_repository,
             ipc::commands::load_graph,
             ipc::commands::save_graph,
             ipc::commands::list_worktrees,
@@ -44,6 +51,20 @@ pub fn run() {
             ipc::commands::remove_worktree,
             ipc::commands::merge_worktree,
             ipc::commands::get_git_diff,
+            ipc::commands::github_account_status,
+            ipc::commands::github_repo_connection,
+            ipc::commands::github_list_repositories,
+            ipc::commands::github_connect_repository,
+            ipc::commands::github_clone_repository,
+            ipc::commands::github_start_sign_in,
+            ipc::commands::pull_request_status,
+            ipc::commands::create_pull_request,
+            ipc::commands::merge_pull_request,
+            ipc::commands::sync_with_base,
+            ipc::commands::start_agent_task,
+            ipc::commands::provider_auth_status,
+            ipc::commands::provider_start_sign_in,
+            ipc::commands::list_provider_models,
             ipc::commands::watch_workspace,
             ipc::commands::unwatch_workspace,
             ipc::commands::spawn_agent_pty,
@@ -57,7 +78,7 @@ pub fn run() {
             ipc::commands::list_run_events,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building OpenConductor");
+        .expect("error while building Condurence");
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {

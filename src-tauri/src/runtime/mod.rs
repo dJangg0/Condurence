@@ -91,7 +91,11 @@ impl CoreRuntime {
     }
 
     pub fn recent_repositories(&self) -> AppResult<Vec<RepoRecord>> {
-        self.db.recent_repos(20)
+        self.db.recent_repos(200)
+    }
+
+    pub fn archived_repositories(&self) -> AppResult<Vec<RepoRecord>> {
+        self.db.archived_repos(100)
     }
 
     /// Graceful shutdown: cancel runs first so awaiting handoffs unwind, then terminate

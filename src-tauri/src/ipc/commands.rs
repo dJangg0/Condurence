@@ -6,11 +6,15 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use crate::auth::{self, ProviderAuth};
 use crate::env::resolver;
 use crate::error::{AppError, AppResult};
 use crate::git::{self, diff_engine::FileDiff, worktree::{self, MergeResult, WorktreeInfo}};
+use crate::github::{self, GitHubAccount, RepoConnection, RepoSummary};
 use crate::graph::{self, AgentProvider, OrchestrationGraph};
+use crate::models::{self, ModelOption};
 use crate::pty::SpawnSpec;
+use crate::pulls;
 use crate::runtime::{now_ms, state_db::{RepoRecord, RunEvent}, CoreRuntime, RepoMetadata};
 
 type Runtime<'a> = State<'a, Arc<CoreRuntime>>;
@@ -28,6 +32,23 @@ pub async fn open_repository(runtime: Runtime<'_>, path: String) -> AppResult<Re
 #[tauri::command]
 pub fn list_recent_repositories(runtime: Runtime<'_>) -> AppResult<Vec<RepoRecord>> {
     runtime.recent_repositories()
+}
+
+#[tauri::command]
+pub fn list_archived_repositories(runtime: Runtime<'_>) -> AppResult<Vec<RepoRecord>> {
+    runtime.archived_repositories()
+}
+
+/// Hides a repository from Recent, or restores it. Never touches files on disk.
+#[tauri::command]
+pub fn archive_repository(runtime: Runtime<'_>, path: String, archived: bool) -> AppResult<()> {
+    runtime.db.set_repo_archived(&path, archived)
+}
+
+/// Removes a repository from the app's lists. Never touches files on disk.
+#[tauri::command]
+pub fn forget_repository(runtime: Runtime<'_>, path: String) -> AppResult<()> {
+    runtime.db.forget_repo(&path)
 }
 
 #[tauri::command]
@@ -104,6 +125,165 @@ pub fn watch_workspace(runtime: Runtime<'_>, worktree_path: String) -> AppResult
 #[tauri::command]
 pub fn unwatch_workspace(runtime: Runtime<'_>, worktree_path: String) {
     runtime.watchers.unwatch(Path::new(&worktree_path));
+}
+
+// ---------------------------------------------------------------- github
+
+/// The `gh` binary. `OPENCONDUCTOR_GH_BIN` pins an explicit build, as it does for provider CLIs.
+fn gh_binary() -> Option<PathBuf> {
+    resolver::resolve_provider("gh")
+}
+
+/// Working directory for `gh` calls that are not tied to a repository.
+fn home_or_root() -> PathBuf {
+    crate::runtime::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+#[tauri::command]
+pub async fn github_account_status() -> AppResult<GitHubAccount> {
+    github::account_status(gh_binary().as_deref(), &home_or_root()).await
+}
+
+#[tauri::command]
+pub async fn github_repo_connection(repo_path: String) -> AppResult<RepoConnection> {
+    let root = git::repo_root(Path::new(&repo_path)).await?;
+    github::repo_connection(gh_binary().as_deref(), &root).await
+}
+
+#[tauri::command]
+pub async fn github_list_repositories() -> AppResult<Vec<RepoSummary>> {
+    github::list_repositories(gh_binary().as_deref(), &home_or_root()).await
+}
+
+#[tauri::command]
+pub async fn github_connect_repository(repo_path: String, name_with_owner: String) -> AppResult<RepoConnection> {
+    let root = git::repo_root(Path::new(&repo_path)).await?;
+    github::connect_repository(gh_binary().as_deref(), &root, &name_with_owner).await
+}
+
+/// Clones a repository from the signed-in account into `~/OpenConductor/repos` and returns its path.
+#[tauri::command]
+pub async fn github_clone_repository(name_with_owner: String) -> AppResult<String> {
+    let home = crate::runtime::home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    let root = github::default_clone_root(&home);
+    let path = github::clone_repository(gh_binary().as_deref(), &root, &name_with_owner).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Runs `gh auth login` in a PTY. The frontend shows it in the normal terminal pane and
+/// re-checks the account when the process exits.
+#[tauri::command]
+pub fn github_start_sign_in(runtime: Runtime<'_>, session_id: String) -> AppResult<()> {
+    let gh = gh_binary().ok_or_else(|| AppError::msg(github::GH_MISSING))?;
+    let cwd = home_or_root();
+    runtime.db.record_pty_session(&session_id, None, None, &cwd, "gh auth login", now_ms())?;
+    runtime.pty.spawn(SpawnSpec {
+        session_id,
+        cwd,
+        program: gh.to_string_lossy().into_owned(),
+        args: github::sign_in_args(),
+        env: vec![],
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+    })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- pull requests
+
+#[tauri::command]
+pub async fn pull_request_status(worktree_path: String, branch: String) -> AppResult<Option<pulls::PullRequestStatus>> {
+    pulls::status(gh_binary().as_deref(), Path::new(&worktree_path), &branch).await
+}
+
+#[tauri::command]
+pub async fn create_pull_request(worktree_path: String, branch: String, base: String) -> AppResult<pulls::PullRequestStatus> {
+    pulls::create(gh_binary().as_deref(), Path::new(&worktree_path), &branch, &base).await
+}
+
+#[tauri::command]
+pub async fn merge_pull_request(worktree_path: String, branch: String) -> AppResult<pulls::PullRequestStatus> {
+    pulls::merge(gh_binary().as_deref(), Path::new(&worktree_path), &branch).await
+}
+
+#[tauri::command]
+pub async fn sync_with_base(worktree_path: String, branch: String, base: String) -> AppResult<pulls::SyncOutcome> {
+    pulls::sync_with_base(Path::new(&worktree_path), &branch, &base).await
+}
+
+/// Opens Claude in the workspace on a `review` or `resolve` prompt. The prompt is built in the
+/// backend from a fixed template, so the frontend never supplies agent instructions.
+#[tauri::command]
+pub fn start_agent_task(
+    runtime: Runtime<'_>,
+    session_id: String,
+    worktree_path: String,
+    task: String,
+    base: String,
+) -> AppResult<()> {
+    let claude = resolver::resolve_provider("claude")
+        .ok_or_else(|| AppError::msg("'claude' was not found on your PATH"))?;
+    let cwd = PathBuf::from(&worktree_path);
+    if !cwd.is_dir() {
+        crate::error::bail!("'{worktree_path}' is not a directory");
+    }
+    let prompt = pulls::task_prompt(&task, &base)?;
+    runtime.db.record_pty_session(&session_id, None, None, &cwd, "claude", now_ms())?;
+    runtime.pty.spawn(SpawnSpec {
+        session_id,
+        cwd,
+        program: claude.to_string_lossy().into_owned(),
+        args: vec![prompt],
+        env: vec![],
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+    })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- provider sign-in
+
+/// Sign-in state for the Claude, Codex and OpenCode CLIs.
+#[tauri::command]
+pub async fn provider_auth_status() -> AppResult<Vec<ProviderAuth>> {
+    let [a, b, c] = auth::SIGN_IN_PROVIDERS;
+    let binaries = [
+        resolver::resolve_provider(a.binary()),
+        resolver::resolve_provider(b.binary()),
+        resolver::resolve_provider(c.binary()),
+    ];
+    Ok(auth::all_statuses(binaries).await)
+}
+
+/// Runs the provider CLI's own login flow in a PTY, shown in the normal terminal pane.
+#[tauri::command]
+pub fn provider_start_sign_in(runtime: Runtime<'_>, session_id: String, provider: String) -> AppResult<()> {
+    let parsed = parse_provider(&provider)?;
+    let args = auth::sign_in_args(parsed)
+        .ok_or_else(|| AppError::msg(format!("signing in to '{provider}' is not supported here")))?;
+    let binary = resolver::resolve_provider(parsed.binary())
+        .ok_or_else(|| AppError::msg(format!("'{}' was not found on your PATH", parsed.binary())))?;
+    let cwd = home_or_root();
+    let command = format!("{} {}", parsed.binary(), args.join(" "));
+    runtime.db.record_pty_session(&session_id, None, None, &cwd, &command, now_ms())?;
+    runtime.pty.spawn(SpawnSpec {
+        session_id,
+        cwd,
+        program: binary.to_string_lossy().into_owned(),
+        args,
+        env: vec![],
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+    })?;
+    Ok(())
+}
+
+/// Models to offer in the topology inspector for a provider.
+#[tauri::command]
+pub async fn list_provider_models(provider: String) -> AppResult<Vec<ModelOption>> {
+    let parsed = parse_provider(&provider)?;
+    let binary = resolver::resolve_provider(parsed.binary());
+    Ok(models::list_models(parsed, binary.as_deref(), &home_or_root()).await)
 }
 
 // ---------------------------------------------------------------- terminals

@@ -53,6 +53,9 @@ pub struct AgentNodeData {
     pub provider: AgentProvider,
     #[serde(default)]
     pub model: String,
+    /// Reasoning effort for the provider CLI, such as `low`. Empty uses the CLI's default.
+    #[serde(default)]
+    pub effort: String,
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -163,6 +166,7 @@ pub fn default_graph() -> OrchestrationGraph {
                     role: "Primary Orchestrator".into(),
                     provider: AgentProvider::Claude,
                     model: "opus".into(),
+                    effort: String::new(),
                     skills: vec!["spec-planner".into(), "task-router".into()],
                     context_paths: vec!["AGENTS.md".into(), "docs/".into()],
                     system_prompt: "Decompose user goals into scoped tasks and delegate via MCP tools.".into(),
@@ -179,6 +183,7 @@ pub fn default_graph() -> OrchestrationGraph {
                     role: "Implementation".into(),
                     provider: AgentProvider::Claude,
                     model: "sonnet".into(),
+                    effort: String::new(),
                     skills: vec![],
                     context_paths: vec!["src/".into()],
                     system_prompt: "Implement the delegated task. Keep changes small and commit when done.".into(),
@@ -195,6 +200,7 @@ pub fn default_graph() -> OrchestrationGraph {
                     role: "Verification".into(),
                     provider: AgentProvider::Codex,
                     model: String::new(),
+                    effort: String::new(),
                     skills: vec![],
                     context_paths: vec!["tests/".into()],
                     system_prompt: "Run the verification command, reproduce failures and report evidence.".into(),
@@ -246,6 +252,9 @@ pub fn is_valid_node_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Reasoning-effort levels accepted by the provider adapters. Empty means the CLI default.
+pub const EFFORT_LEVELS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
 pub fn validate(graph: &OrchestrationGraph) -> AppResult<()> {
     let mut node_ids: HashSet<&str> = HashSet::new();
     for node in &graph.nodes {
@@ -261,6 +270,14 @@ pub fn validate(graph: &OrchestrationGraph) -> AppResult<()> {
         }
         if node.data.name.trim().is_empty() {
             crate::error::bail!("Node '{}' needs a name", node.id);
+        }
+        if !node.data.effort.is_empty() && !EFFORT_LEVELS.contains(&node.data.effort.as_str()) {
+            crate::error::bail!(
+                "Node '{}' has unknown effort '{}': use one of {}",
+                node.id,
+                node.data.effort,
+                EFFORT_LEVELS.join(", ")
+            );
         }
     }
 
@@ -320,6 +337,24 @@ pub fn save(repo_root: &Path, graph: &OrchestrationGraph) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_is_validated_and_defaults_to_empty_for_old_graph_files() {
+        let mut graph = default_graph();
+        graph.nodes[0].data.effort = "low".into();
+        validate(&graph).expect("known effort is accepted");
+        graph.nodes[0].data.effort = "turbo".into();
+        let error = validate(&graph).unwrap_err().to_string();
+        assert!(error.contains("unknown effort 'turbo'"), "{error}");
+
+        // A graph.json written before the field existed still loads.
+        let mut value = serde_json::to_value(default_graph()).unwrap();
+        for node in value["nodes"].as_array_mut().unwrap() {
+            node["data"].as_object_mut().unwrap().remove("effort");
+        }
+        let loaded: OrchestrationGraph = serde_json::from_value(value).unwrap();
+        assert!(loaded.nodes.iter().all(|n| n.data.effort.is_empty()));
+    }
 
     #[test]
     fn default_graph_is_valid_and_round_trips() {

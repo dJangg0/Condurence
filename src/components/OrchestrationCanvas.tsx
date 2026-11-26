@@ -10,10 +10,19 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { AgentNode } from "./AgentNode";
+import { EdgeFlowContext, FlowEdge } from "./FlowEdge";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { ApprovalQueue, RunLogPane, type LogLine } from "./RunPanel";
+import { RunTabs, type AgentTab } from "./RunTabs";
 import { TerminalPane } from "./TerminalPane";
 import { events, ipc } from "../lib/ipc";
+import {
+  applyStatus as applyEdgeStatus,
+  applyToolCall,
+  clearEdges,
+  returningEdgeIds,
+  type EdgeFlowState,
+} from "../lib/flow";
 import {
   defaultAgentData,
   defaultEdgeData,
@@ -37,6 +46,7 @@ import {
 } from "../types/orchestration";
 
 const NODE_TYPES = { agentNode: AgentNode };
+const EDGE_TYPES = { flow: FlowEdge };
 
 type Notice = { tone: "info" | "error"; text: string };
 type Selection = { kind: "node" | "edge"; id: string } | null;
@@ -78,11 +88,44 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequestEvent[]>([]);
+  // Run progress: which edges are carrying a message, when each agent started, and its last result.
+  const [edgeFlow, setEdgeFlow] = useState<EdgeFlowState>({});
+  const [startedAt, setStartedAt] = useState<Record<string, number>>({});
+  const [summaries, setSummaries] = useState<Record<string, string>>({});
+  const [follow, setFollow] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
   const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  const followRef = useRef(follow);
+  const focusRef = useRef(focusNodeId);
 
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
+  useEffect(() => {
+    followRef.current = follow;
+  }, [follow]);
+  useEffect(() => {
+    focusRef.current = focusNodeId;
+  }, [focusNodeId]);
+
+  // A result that has returned to its caller stops animating after a moment.
+  useEffect(() => {
+    const returning = returningEdgeIds(edgeFlow);
+    if (returning.length === 0) return;
+    const timer = setTimeout(() => setEdgeFlow((current) => clearEdges(current, returning)), 2500);
+    return () => clearTimeout(timer);
+  }, [edgeFlow]);
+
+  // Tick once a second while a run is active, so elapsed times keep counting.
+  useEffect(() => {
+    if (!run) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [run]);
 
   // Load the topology from disk whenever the repository changes.
   useEffect(() => {
@@ -126,15 +169,44 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       if (sessionId) setSessions((current) => ({ ...current, [nodeId]: sessionId }));
     };
 
+    const flowEdges = () =>
+      edgesRef.current.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        relationType: edge.data?.relationType ?? ("delegates_to" as const),
+      }));
+
     for (const node of nodesRef.current) {
       void events
         .nodeStatus(node.id, (payload) => {
-          if (payload.runId === runId) applyStatus(node.id, payload.status, payload.sessionId);
+          if (payload.runId !== runId) return;
+          applyStatus(node.id, payload.status, payload.sessionId);
+          setEdgeFlow((current) => applyEdgeStatus(current, flowEdges(), node.id, payload.status));
+          if (payload.status === "running") setStartedAt((current) => ({ ...current, [node.id]: Date.now() }));
+          const headline = payload.summary;
+          if (headline && (payload.status === "idle" || payload.status === "error")) {
+            setSummaries((current) => ({ ...current, [node.id]: headline }));
+          }
+          // Follow the work: show the agent that just started, and return to the orchestrator after.
+          if (!followRef.current) return;
+          if (payload.status === "running" && payload.sessionId && node.id !== run.rootId) {
+            setFocusNodeId(node.id);
+          } else if ((payload.status === "idle" || payload.status === "error") && node.id !== run.rootId) {
+            setTimeout(() => {
+              if (followRef.current && focusRef.current === node.id) setFocusNodeId(run.rootId);
+            }, 1500);
+          }
         })
         .then(track);
     }
     void events
       .runLog(runId, (entry) => {
+        if (entry.kind === "mcp_call" && entry.nodeId && typeof entry.payload.tool === "string") {
+          const caller = entry.nodeId;
+          const tool = entry.payload.tool;
+          setEdgeFlow((current) => applyToolCall(current, flowEdges(), caller, tool));
+        }
         setLog((current) => [
           ...current.slice(-399),
           {
@@ -155,13 +227,23 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     // recover the latest status and terminal session per node from the journal.
     void ipc.listRunEvents(runId, 1000).then((journal: RunEvent[]) => {
       if (disposed) return;
+      let replayedFlow: EdgeFlowState = {};
+      const replayedStarts: Record<string, number> = {};
       for (const event of journal) {
         if (event.kind === "status" && event.nodeId) {
           const status = event.payload.status as AgentNodeData["status"];
           const sessionId = typeof event.payload.sessionId === "string" ? event.payload.sessionId : null;
           applyStatus(event.nodeId, status, sessionId);
+          replayedFlow = applyEdgeStatus(replayedFlow, flowEdges(), event.nodeId, status);
+          if (status === "running") replayedStarts[event.nodeId] = event.createdMs;
+        } else if (event.kind === "mcp_call" && event.nodeId && typeof event.payload.tool === "string") {
+          replayedFlow = applyToolCall(replayedFlow, flowEdges(), event.nodeId, event.payload.tool);
         }
       }
+      // Anything already returning is stale by now. Live events that arrived first win.
+      replayedFlow = clearEdges(replayedFlow, returningEdgeIds(replayedFlow));
+      setEdgeFlow((current) => ({ ...replayedFlow, ...current }));
+      setStartedAt((current) => ({ ...replayedStarts, ...current }));
     });
 
     return () => {
@@ -280,12 +362,16 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       setSessions({});
       setLog([]);
       setApprovals([]);
+      setEdgeFlow({});
+      setStartedAt({});
+      setSummaries({});
+      setFollow(true);
       setFocusNodeId(rootId);
       setNodes((current) => current.map((node) => ({ ...node, data: { ...node.data, status: "idle" } })));
       setRun({ runId, rootId });
       setNotice({
         tone: "info",
-        text: `Run started. "${rootId}" is interactive: converse with it in the terminal below.`,
+        text: `Run started. "${rootId}" is interactive: converse with it in the terminal below. If Claude asks whether you trust the folder, choose "Yes, I trust this folder" (press ↓ then Enter).`,
       });
     } catch (error) {
       setNotice({ tone: "error", text: String(error) });
@@ -301,6 +387,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       await ipc.stopOrchestrationRun(run.runId);
       setRun(null);
       setApprovals([]);
+      setEdgeFlow({});
       setNotice({ tone: "info", text: "Run stopped. Agent sessions were terminated." });
     } catch (error) {
       setNotice({ tone: "error", text: String(error) });
@@ -324,6 +411,19 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
   const selectedEdge = selection?.kind === "edge" ? edges.find((edge) => edge.id === selection.id) : undefined;
   const problems = validateGraph(fromFlow(nodes, edges, worktreeDefault));
   const focusSession = focusNodeId ? sessions[focusNodeId] : undefined;
+  const tabs: AgentTab[] = Object.keys(sessions)
+    .map((nodeId): AgentTab => {
+      const node = nodes.find((item) => item.id === nodeId);
+      return {
+        nodeId,
+        name: node?.data.name ?? nodeId,
+        status: node?.data.status ?? "idle",
+        isRoot: run?.rootId === nodeId,
+        startedAt: startedAt[nodeId],
+        summary: summaries[nodeId],
+      };
+    })
+    .sort((a, b) => Number(b.isRoot) - Number(a.isRoot) || (a.startedAt ?? 0) - (b.startedAt ?? 0));
   const focusIsInteractiveRoot = run !== null && focusNodeId === run.rootId;
 
   return (
@@ -404,7 +504,9 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
 
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
+          <EdgeFlowContext.Provider value={edgeFlow}>
           <ReactFlow
+            edgeTypes={EDGE_TYPES}
             nodes={nodes}
             edges={edges}
             nodeTypes={NODE_TYPES}
@@ -413,7 +515,10 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
             onConnect={onConnect}
             onNodeClick={(_, node) => {
               setSelection({ kind: "node", id: node.id });
-              if (sessions[node.id]) setFocusNodeId(node.id);
+              if (sessions[node.id]) {
+                setFocusNodeId(node.id);
+                setFollow(false);
+              }
             }}
             onEdgeClick={(_, edge) => setSelection({ kind: "edge", id: edge.id })}
             onPaneClick={() => setSelection(null)}
@@ -426,6 +531,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
             <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} color="#3f3f46" />
             <Controls showInteractive={false} />
           </ReactFlow>
+          </EdgeFlowContext.Provider>
           {nodes.length === 0 ? (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
               Add an agent, then drag from one node's handle to another to wire a routing rule.
@@ -493,14 +599,22 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
 
       <div className="flex h-72 shrink-0 border-t border-zinc-800">
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5 text-xs text-zinc-400">
-            <span className="font-medium text-zinc-300">Terminal</span>
-            {focusNodeId ? <span className="font-mono text-indigo-300">{nameOf(focusNodeId)}</span> : null}
-            {focusIsInteractiveRoot ? <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">interactive</span> : null}
-            {focusSession && focusNodeId && !focusIsInteractiveRoot ? (
-              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">read-only stream</span>
-            ) : null}
-          </div>
+          <RunTabs
+            tabs={tabs}
+            focusNodeId={focusNodeId}
+            onFocus={(nodeId) => {
+              setFocusNodeId(nodeId);
+              setFollow(false);
+            }}
+            follow={follow}
+            onFollowChange={(next) => {
+              setFollow(next);
+              // Turning Follow back on jumps to whoever is working now.
+              const working = tabs.find((tab) => tab.status === "running" && !tab.isRoot);
+              if (next && working) setFocusNodeId(working.nodeId);
+            }}
+            now={now}
+          />
           <div className="min-h-0 flex-1">
             {focusSession ? (
               <TerminalPane key={focusSession} sessionId={focusSession} interactive={focusIsInteractiveRoot} />

@@ -14,6 +14,8 @@ export type AgentNodeData = {
   role: string;
   provider: AgentProvider;
   model: string;
+  /** Reasoning effort passed to the CLI, such as `low`. Empty uses the CLI's default. */
+  effort: string;
   skills: string[];
   contextPaths: string[];
   systemPrompt: string;
@@ -48,6 +50,12 @@ export type OrchestrationGraph = {
   nodes: GraphNode[];
   edges: GraphEdge[];
 };
+
+/** Effort levels the provider adapters accept. Mirrors `EFFORT_LEVELS` in `src-tauri/src/graph/mod.rs`. */
+export const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+/** A model the provider CLI offers, for the inspector's model dropdown. */
+export type ModelOption = { id: string; label: string; note: string | null };
 
 export const PROVIDERS: readonly AgentProvider[] = ["claude", "codex", "opencode", "gemini"];
 
@@ -117,6 +125,7 @@ export type RepoRecord = {
   path: string;
   name: string;
   lastOpenedMs: number;
+  archived: boolean;
 };
 
 export type WorktreeInfo = {

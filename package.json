@@ -1,7 +1,7 @@
 {
   "name": "open-conductor",
   "version": "0.1.0",
-  "description": "OpenConductor: native ADE with worktree workspaces and railway-style multi-agent orchestration",
+  "description": "Condurence: native ADE with worktree workspaces and railway-style multi-agent orchestration",
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
