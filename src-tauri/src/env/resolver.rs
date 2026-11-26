@@ -59,13 +59,23 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
 }
 
 /// Resolves a provider CLI. `OPENCONDUCTOR_<NAME>_BIN` (e.g. `OPENCONDUCTOR_CLAUDE_BIN`)
-/// pins an explicit executable, for custom installs and for tests.
+/// pins an explicit executable, for custom installs and for tests. The result is the installed
+/// executable itself, with symlinks followed (see `installed_executable`).
 pub fn resolve_provider(name: &str) -> Option<PathBuf> {
     let var = format!("OPENCONDUCTOR_{}_BIN", name.to_ascii_uppercase());
-    match std::env::var_os(&var).map(PathBuf::from) {
+    let found = match std::env::var_os(&var).map(PathBuf::from) {
         Some(path) if path.is_file() => Some(path),
         _ => resolve_binary(name),
-    }
+    };
+    found.map(|path| installed_executable(&path))
+}
+
+/// Follows symlinks to the real executable. Codex looks for its helper, `codex-code-mode-host`,
+/// beside the path it was launched from, and the helper's tools run through it. A `codex` link in
+/// a directory that does not hold the helper therefore starts Codex with no shell or MCP tools.
+/// The real executable sits next to its helper. Falls back to `path` if it cannot be resolved.
+pub fn installed_executable(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(unix)]
@@ -181,5 +191,33 @@ mod tests {
     #[test]
     fn returns_none_without_markers() {
         assert!(parse_env_block("PATH=/bin").is_none());
+    }
+
+    /// Mirrors the layout that broke Codex: an override directory links to Conductor's `bin`,
+    /// which links to the versioned install that holds the code-mode helper.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cli_launches_from_the_install_that_holds_its_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("agent-binaries/codex/0.172.0");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("codex"), "").unwrap();
+        std::fs::write(install.join("codex-code-mode-host"), "").unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(install.join("codex"), bin.join("codex")).unwrap();
+        let overrides = dir.path().join("bin-overrides/1804c2be2f413862");
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::os::unix::fs::symlink(bin.join("codex"), overrides.join("codex")).unwrap();
+
+        let launched = installed_executable(&overrides.join("codex"));
+        assert_eq!(launched, install.join("codex").canonicalize().unwrap());
+        assert!(launched.parent().unwrap().join("codex-code-mode-host").is_file());
+    }
+
+    #[test]
+    fn a_missing_path_is_returned_unchanged() {
+        let missing = Path::new("/definitely/not/installed/codex");
+        assert_eq!(installed_executable(missing), missing);
     }
 }
