@@ -7,6 +7,39 @@ A native Agentic Development Environment built with **Tauri v2** (Rust) and **Re
 
 The topology is committed to each repository as `.orchestrator/graph.json`. Runtime telemetry lives in `~/.openconductor/state.db`.
 
+## Quick start
+
+1. **Install the prerequisites** listed under [Requirements](#requirements). If you don't have Rust yet:
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source "$HOME/.cargo/env"
+   ```
+
+2. **Install the agent CLIs you plan to use**, then sign in to each once from a terminal. Any install method works, as long as the binary is on your `PATH`:
+
+   ```bash
+   npm install -g @anthropic-ai/claude-code   # claude
+   npm install -g @openai/codex               # codex
+   npm install -g @google/gemini-cli          # gemini
+   npm install -g opencode-ai                 # opencode
+   ```
+
+3. **Clone and run:**
+
+   ```bash
+   git clone https://github.com/dJangg0/Condurrence.git
+   cd Condurrence
+   npm install
+   npm run tauri dev
+   ```
+
+   The first run compiles the Rust dependencies, which can take several minutes. Later runs start in seconds, and a Condurence window opens.
+
+4. **Try it** on a git repository that has at least one commit, since a workspace branches from a commit:
+   - **Workspaces:** open the repository, create a workspace from a branch name, then launch a Shell or an agent CLI inside it. The diff updates as files change.
+   - **Agent Orchestration:** a repository with no topology yet opens with a default one (CEO / Architect, Senior Developer, Debugger & QA). Edit it, press **Save** (⌘S) to write `.orchestrator/graph.json`, pick a root, enter a goal, and press **Run topology**. The root runs in an interactive terminal. Delegated agents appear as read-only streams, and you can inspect one by clicking its node. Approval gates appear in the run log panel.
+
 ## Requirements
 
 - Node.js 22+ and npm
@@ -36,6 +69,23 @@ cd src-tauri && cargo test
 
 To point Condurence at a specific CLI build, set `OPENCONDUCTOR_<PROVIDER>_BIN`, for example `OPENCONDUCTOR_CLAUDE_BIN=/opt/tools/claude`.
 
+## Where things live
+
+| What | Where |
+| --- | --- |
+| Topology | `<repo>/.orchestrator/graph.json` (commit this file) |
+| Workspaces | `<repo>/.worktrees/` (hidden from `git status` through `.git/info/exclude`) |
+| Repo-local skills | `<repo>/.orchestrator/skills/<name>.md`, falling back to `~/.openconductor/skills/<name>.md` |
+| Run telemetry | `~/.openconductor/state.db` |
+| Run scratch files | `$TMPDIR/openconductor/<run-id>/`, removed when the run stops |
+
+## Troubleshooting
+
+- **"'claude' was not found on your PATH":** Condurence imports your login shell's `PATH` at startup. Check that the CLI runs in a new terminal, then restart the app. To pin a binary instead, set `OPENCONDUCTOR_<PROVIDER>_BIN`, for example `OPENCONDUCTOR_CLAUDE_BIN=/path/to/claude npm run tauri dev`. The providers are `CLAUDE`, `CODEX`, `GEMINI` and `OPENCODE`. The GitHub CLI pins the same way, with `OPENCONDUCTOR_GH_BIN`.
+- **Rust build fails on macOS:** run `xcode-select --install`, then open a new terminal.
+- **Port 1420 is in use:** another dev server is running. Stop it, because Vite is set to `strictPort`.
+- **Workspace creation fails in a new repository:** make at least one commit first.
+
 ## Specification
 
 The baseline requirements for the multi-agent orchestration subsystem are in [`docs/SRS-multi-agent-orchestration.md`](docs/SRS-multi-agent-orchestration.md) (`OC-SRS-MAO-001`, ISO/IEC/IEEE 29148 structure). Requirement IDs such as `FR-EDGE-02` are the reference for tests and changes.
@@ -59,6 +109,6 @@ Each delegated handoff runs headless in a visible PTY with an injected `report_t
 - **Provider adapters:** flags for Claude, Codex, Gemini and OpenCode were checked against each CLI's `--help` output and, for the environment variables, against the CLI sources. No live run against an authenticated subscription has been done yet.
 - **Permissions in delegated runs:** headless Claude uses `--permission-mode acceptEdits`, so shell commands such as test runs may be denied. Headless OpenCode uses `--auto`, which auto-approves every permission request. Worktree isolation limits the blast radius, but this is a real trust decision.
 - **Gemini sign-in:** `GEMINI_CLI_HOME` relocates the whole Gemini home. The ephemeral home therefore symlinks your real `~/.gemini` entries and only writes its own `settings.json`. On Windows symlinks need extra privileges, so delegated Gemini runs there start signed out.
-- **Windows:** not yet compiled for Windows. Process-tree teardown uses `taskkill /T` rather than Job Objects, and `.cmd` shims are launched through `cmd.exe`.
+- **Windows:** type-checked for `x86_64-pc-windows-msvc` but not run. Process-tree teardown uses `taskkill /T` rather than Job Objects, and `.cmd` shims are launched through `cmd.exe`.
 - **Escalation:** the root orchestrator is interactive, so `escalates_to` into the root starts a fresh headless instance of the root's provider with the escalation context.
 - **Merging:** squash-merged branches are not ancestors of their target, so `git branch -d` keeps them. Removing a workspace therefore never discards unmerged work.
