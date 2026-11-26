@@ -13,6 +13,7 @@ pub mod models;
 pub mod pty;
 pub mod pulls;
 pub mod runtime;
+pub mod usage;
 
 use std::sync::Arc;
 
@@ -76,6 +77,8 @@ pub fn run() {
             ipc::commands::stop_orchestration_run,
             ipc::commands::resolve_approval_gate,
             ipc::commands::list_run_events,
+            ipc::commands::run_usage,
+            ipc::commands::provider_usage_summary,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Condurence");

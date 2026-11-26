@@ -15,6 +15,7 @@ use crate::graph::{self, AgentProvider, OrchestrationGraph};
 use crate::models::{self, ModelOption};
 use crate::pty::SpawnSpec;
 use crate::pulls;
+use crate::usage::{self, ProviderUsage};
 use crate::runtime::{now_ms, state_db::{RepoRecord, RunEvent}, CoreRuntime, RepoMetadata};
 
 type Runtime<'a> = State<'a, Arc<CoreRuntime>>;
@@ -380,6 +381,33 @@ pub fn resolve_approval_gate(runtime: Runtime<'_>, run_id: String, edge_id: Stri
 #[tauri::command]
 pub fn list_run_events(runtime: Runtime<'_>, run_id: String, limit: Option<i64>) -> AppResult<Vec<RunEvent>> {
     runtime.db.list_events(&run_id, limit.unwrap_or(500))
+}
+
+/// Token usage each provider's CLI recorded for one run. Unknown runs report no rows.
+#[tauri::command]
+pub async fn run_usage(runtime: Runtime<'_>, run_id: String) -> AppResult<Vec<ProviderUsage>> {
+    let Some(inputs) = runtime.db.run_usage_inputs(&run_id)? else {
+        return Ok(Vec::new());
+    };
+    let home = crate::runtime::home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    let reader = runtime.usage.clone();
+    let now = now_ms();
+    // Reading session logs touches many files, so keep it off the async runtime's threads.
+    tokio::task::spawn_blocking(move || usage::measure_run(&reader, &home, &inputs, now))
+        .await
+        .map_err(|error| AppError::msg(format!("usage scan failed: {error}")))
+}
+
+/// Token usage per provider across every session on this Mac that started in the last
+/// `usage::SUMMARY_DAYS` days. Backs the token usage section of the profile pane.
+#[tauri::command]
+pub async fn provider_usage_summary(runtime: Runtime<'_>) -> AppResult<Vec<ProviderUsage>> {
+    let home = crate::runtime::home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    let reader = runtime.usage.clone();
+    let now = now_ms();
+    tokio::task::spawn_blocking(move || usage::summarize(&reader, &home, usage::SUMMARY_DAYS, now))
+        .await
+        .map_err(|error| AppError::msg(format!("usage scan failed: {error}")))
 }
 
 fn parse_provider(name: &str) -> AppResult<AgentProvider> {

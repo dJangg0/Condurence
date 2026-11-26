@@ -2,7 +2,8 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { PROVIDER_LABELS, type AgentProvider, type NodeStatus } from "../types/orchestration";
 import type { AgentFlowNode } from "../lib/graph";
 
-const ACCENT: Record<AgentProvider, string> = {
+/** Provider colour shared by node rails and usage meters. */
+export const PROVIDER_ACCENT: Record<AgentProvider, string> = {
   claude: "bg-orange-400",
   codex: "bg-emerald-400",
   gemini: "bg-sky-400",
@@ -37,7 +38,7 @@ export function AgentNode({ data, selected }: NodeProps<AgentFlowNode>) {
     >
       <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
       <div className="flex">
-        <div className={`w-1.5 shrink-0 rounded-l-lg ${ACCENT[data.provider]}`} aria-hidden />
+        <div className={`w-1.5 shrink-0 rounded-l-lg ${PROVIDER_ACCENT[data.provider]}`} aria-hidden />
         <div className="min-w-0 flex-1 p-3">
           <div className="flex items-center justify-between gap-2">
             <span className="truncate text-sm font-semibold text-zinc-100">{data.name}</span>

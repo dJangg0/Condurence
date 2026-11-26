@@ -112,6 +112,19 @@ export type RunEvent = {
   createdMs: number;
 };
 
+/** Token usage one provider's CLI recorded for a run. Mirrors `src-tauri/src/usage/mod.rs`. */
+export type ProviderUsage = {
+  provider: AgentProvider;
+  /** False when that CLI's logs are not read yet, so the token counts are zero and not meaningful. */
+  measured: boolean;
+  /** Session files attributed to the run. */
+  sessions: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
 // ---------------------------------------------------------------- git & workspaces
 
 export type RepoMetadata = {

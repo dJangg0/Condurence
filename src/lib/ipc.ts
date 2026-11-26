@@ -8,6 +8,7 @@ import type {
   NodeStatusEvent,
   OrchestrationGraph,
   ModelOption,
+  ProviderUsage,
   RepoMetadata,
   RepoRecord,
   RunEvent,
@@ -75,6 +76,8 @@ export const ipc = {
   resolveApprovalGate: (runId: string, edgeId: string, approved: boolean) =>
     invoke<void>("resolve_approval_gate", { runId, edgeId, approved }),
   listRunEvents: (runId: string, limit?: number) => invoke<RunEvent[]>("list_run_events", { runId, limit: limit ?? null }),
+  runUsage: (runId: string) => invoke<ProviderUsage[]>("run_usage", { runId }),
+  providerUsageSummary: () => invoke<ProviderUsage[]>("provider_usage_summary"),
 };
 
 /** Typed subscriptions over the runtime event bus (HANDOFF §6.4 events). */

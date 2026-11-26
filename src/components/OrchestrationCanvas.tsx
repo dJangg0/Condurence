@@ -15,6 +15,7 @@ import { EdgeInspector, NodeInspector } from "./Inspector";
 import { ApprovalQueue, RunLogPane, type LogLine } from "./RunPanel";
 import { RunTabs, type AgentTab } from "./RunTabs";
 import { TerminalPane } from "./TerminalPane";
+import { UsageMeter } from "./UsageMeter";
 import { events, ipc } from "../lib/ipc";
 import {
   applyStatus as applyEdgeStatus,
@@ -40,6 +41,7 @@ import {
   RELATION_LABELS,
   type AgentNodeData,
   type ApprovalRequestEvent,
+  type ProviderUsage,
   type RoutingEdgeData,
   type RunEvent,
   type WorktreeMode,
@@ -47,6 +49,8 @@ import {
 
 const NODE_TYPES = { agentNode: AgentNode };
 const EDGE_TYPES = { flow: FlowEdge };
+/** How often the usage meter re-reads provider logs while a run is live. */
+const USAGE_POLL_MS = 4000;
 
 type Notice = { tone: "info" | "error"; text: string };
 type Selection = { kind: "node" | "edge"; id: string } | null;
@@ -88,6 +92,9 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequestEvent[]>([]);
+  // Usage for the latest run, live while it runs and kept after it stops.
+  const [usageRunId, setUsageRunId] = useState<string | null>(null);
+  const [usage, setUsage] = useState<ProviderUsage[]>([]);
   // Run progress: which edges are carrying a message, when each agent started, and its last result.
   const [edgeFlow, setEdgeFlow] = useState<EdgeFlowState>({});
   const [startedAt, setStartedAt] = useState<Record<string, number>>({});
@@ -252,6 +259,33 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     };
   }, [run, setNodes]);
 
+  // Usage for the shown run: read now, re-read every few seconds while it is live, and once more
+  // after it stops so the final numbers land. A failed read keeps the last values on screen.
+  useEffect(() => {
+    if (!usageRunId) return;
+    let cancelled = false;
+    const refresh = () => {
+      ipc
+        .runUsage(usageRunId)
+        .then((rows) => {
+          // Keep the same array when nothing changed, so the canvas does not re-render every poll.
+          if (!cancelled) setUsage((current) => (JSON.stringify(current) === JSON.stringify(rows) ? current : rows));
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    if (run?.runId !== usageRunId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = setInterval(refresh, USAGE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [usageRunId, run]);
+
   const persist = useCallback(async (): Promise<boolean> => {
     const graph = fromFlow(nodes, edges, worktreeDefault);
     const problems = validateGraph(graph);
@@ -359,6 +393,8 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       // The backend reads the topology from disk, so a dirty canvas must be saved first.
       if (dirty && !(await persist())) return;
       const runId = await ipc.startOrchestrationRun(repoPath, rootId, trimmedGoal);
+      setUsageRunId(runId);
+      setUsage([]);
       setSessions({});
       setLog([]);
       setApprovals([]);
@@ -501,6 +537,8 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
           {notice.text}
         </div>
       ) : null}
+
+      {usageRunId && usage.length > 0 ? <UsageMeter rows={usage} live={run?.runId === usageRunId} /> : null}
 
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">

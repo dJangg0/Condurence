@@ -15,6 +15,7 @@ use crate::git::{self, locks::RepoLocks, watcher::WorkspaceWatchers};
 use crate::graph;
 use crate::mcp::{self, router::Router};
 use crate::pty::PtyManager;
+use crate::usage::UsageReader;
 use events::EventSink;
 use state_db::{RepoRecord, StateDb};
 
@@ -25,6 +26,8 @@ pub struct CoreRuntime {
     pub locks: Arc<RepoLocks>,
     pub watchers: Arc<WorkspaceWatchers>,
     pub router: Arc<Router>,
+    /// Shared parse cache for provider session logs, used by the run meter and the profile pane.
+    pub usage: Arc<UsageReader>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -64,6 +67,7 @@ impl CoreRuntime {
             locks,
             watchers,
             router,
+            usage: Arc::new(UsageReader::default()),
         })
     }
 

@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -68,6 +68,20 @@ pub struct RunEvent {
     pub kind: String,
     pub payload: Value,
     pub created_ms: i64,
+}
+
+/// What the usage meter needs to attribute a run's sessions. Read back from the database, so a
+/// run that finished in an earlier launch can still be measured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunUsageInputs {
+    pub repo_path: String,
+    pub started_ms: i64,
+    /// Unset while the run is still active.
+    pub ended_ms: Option<i64>,
+    /// CLI binary names that ran in the run, such as `claude`.
+    pub commands: Vec<String>,
+    /// Working directories of the run's sessions, the repository root included.
+    pub cwds: Vec<String>,
 }
 
 pub struct StateDb {
@@ -231,6 +245,37 @@ impl StateDb {
         Ok(())
     }
 
+    /// The facts the usage meter needs for one run, or `None` if the run is unknown.
+    pub fn run_usage_inputs(&self, run_id: &str) -> AppResult<Option<RunUsageInputs>> {
+        let conn = self.conn();
+        let run = conn
+            .query_row(
+                "SELECT repo_path, started_ms, ended_ms FROM runs WHERE id = ?1",
+                params![run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?)),
+            )
+            .optional()?;
+        let Some((repo_path, started_ms, ended_ms)) = run else {
+            return Ok(None);
+        };
+        let commands = distinct_strings(
+            &conn,
+            "SELECT DISTINCT command FROM pty_sessions WHERE run_id = ?1 ORDER BY command",
+            run_id,
+        )?;
+        let mut cwds = distinct_strings(&conn, "SELECT DISTINCT cwd FROM pty_sessions WHERE run_id = ?1", run_id)?;
+        if !cwds.contains(&repo_path) {
+            cwds.push(repo_path.clone());
+        }
+        Ok(Some(RunUsageInputs {
+            repo_path,
+            started_ms,
+            ended_ms,
+            commands,
+            cwds,
+        }))
+    }
+
     pub fn finish_pty_session(&self, id: &str, exit_code: i32, ended_ms: i64) -> AppResult<()> {
         self.conn().execute(
             "UPDATE pty_sessions SET exit_code = ?2, ended_ms = ?3 WHERE id = ?1",
@@ -238,6 +283,12 @@ impl StateDb {
         )?;
         Ok(())
     }
+}
+
+fn distinct_strings(conn: &Connection, sql: &str, run_id: &str) -> AppResult<Vec<String>> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(params![run_id], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 #[cfg(test)]
@@ -339,6 +390,27 @@ mod tests {
         db.upsert_repo("/old", "old", 999).unwrap();
         let order: Vec<_> = db.recent_repos(10).unwrap().into_iter().map(|r| r.path).collect();
         assert_eq!(order, ["/new", "/mid", "/old"], "opening after migration still does not reorder");
+    }
+
+    #[test]
+    fn usage_inputs_list_the_providers_and_directories_a_run_used() {
+        let db = StateDb::open_in_memory().unwrap();
+        db.insert_run("r1", "/repo", "ceo", "goal", 10).unwrap();
+        db.record_pty_session("s1", Some("r1"), Some("ceo"), Path::new("/repo"), "claude", 11).unwrap();
+        db.record_pty_session("s2", Some("r1"), Some("dev"), Path::new("/repo/.worktrees/a"), "codex", 12).unwrap();
+        db.record_pty_session("s3", Some("r1"), Some("dev"), Path::new("/repo/.worktrees/a"), "codex", 13).unwrap();
+        db.record_pty_session("s4", None, None, Path::new("/elsewhere"), "claude", 14).unwrap();
+
+        let inputs = db.run_usage_inputs("r1").unwrap().unwrap();
+        assert_eq!(inputs.repo_path, "/repo");
+        assert_eq!(inputs.started_ms, 10);
+        assert_eq!(inputs.ended_ms, None, "an active run has no end yet");
+        assert_eq!(inputs.commands, ["claude", "codex"]);
+        assert_eq!(inputs.cwds, ["/repo", "/repo/.worktrees/a"]);
+
+        db.finish_run("r1", "stopped", 99).unwrap();
+        assert_eq!(db.run_usage_inputs("r1").unwrap().unwrap().ended_ms, Some(99));
+        assert!(db.run_usage_inputs("missing").unwrap().is_none());
     }
 
     #[test]
