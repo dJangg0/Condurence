@@ -33,7 +33,34 @@ const MS_PER_DAY: i64 = 86_400_000;
 /// Providers the meter knows about, in display order.
 pub const PROVIDERS: [&str; 4] = ["claude", "codex", "opencode", "gemini"];
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+/// One rate-limit window of a subscription plan, as the CLI last reported it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanWindow {
+    /// Share of the window's allowance used, from 0 to 100.
+    pub used_percent: f64,
+    /// Length of the window in minutes, such as 300 (five hours) or 10080 (a week).
+    pub window_minutes: Option<u64>,
+    /// When the window resets, in epoch seconds. Past that moment `used_percent` is out of date.
+    pub resets_at: Option<i64>,
+}
+
+/// What the provider's own rate limits said at the last report in the session logs. This is the
+/// subscription's usage meter (for example ChatGPT Free), not a token count.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanLimit {
+    /// The plan the account is on, such as `free`, `plus` or `pro`.
+    pub plan: Option<String>,
+    pub primary: Option<PlanWindow>,
+    pub secondary: Option<PlanWindow>,
+    /// True when the CLI reported that a limit was hit.
+    pub reached: bool,
+    /// Epoch ms of the report, so the newest one wins and the UI can show how fresh it is.
+    pub reported_ms: i64,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsage {
     /// CLI binary name, such as `claude`.
@@ -46,6 +73,9 @@ pub struct ProviderUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// The subscription's own usage meter, for providers whose logs carry one. The newest report
+    /// among the counted sessions.
+    pub plan_limit: Option<PlanLimit>,
 }
 
 /// Which sessions count: those started inside `[start_ms, end_ms]`, and, when `cwds` is set, only
@@ -76,13 +106,15 @@ impl Tokens {
 }
 
 /// What one session file says about itself.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionRecord {
     /// Working directory the CLI reported for the session.
     pub cwd: Option<String>,
     /// Epoch ms of the session's earliest timestamp.
     pub started_ms: Option<i64>,
     pub tokens: Tokens,
+    /// The last rate-limit report in the session, for CLIs that write one.
+    pub plan_limit: Option<PlanLimit>,
 }
 
 /// Reads session logs and remembers what it parsed. A file is parsed again only when its length or
@@ -90,6 +122,15 @@ pub struct SessionRecord {
 #[derive(Default)]
 pub struct UsageReader {
     cache: Mutex<HashMap<PathBuf, CachedSession>>,
+    /// The last read of Claude Code's account file, reused while the file is unchanged.
+    claude_plan: Mutex<Option<CachedPlan>>,
+}
+
+#[derive(Clone)]
+struct CachedPlan {
+    len: u64,
+    modified_ms: i64,
+    limit: Option<PlanLimit>,
 }
 
 #[derive(Clone)]
@@ -116,6 +157,7 @@ impl UsageReader {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                plan_limit: None,
             };
             let records = match provider {
                 "claude" => self.claude_sessions(home, window),
@@ -125,16 +167,46 @@ impl UsageReader {
                     Vec::new()
                 }
             };
+            if provider == "claude" {
+                row.plan_limit = self.claude_plan_limit(home);
+            }
             for record in records.iter().filter(|record| belongs_to(record, cwds.as_ref(), window)) {
                 row.sessions += 1;
                 row.input_tokens += record.tokens.input;
                 row.output_tokens += record.tokens.output;
                 row.cache_read_tokens += record.tokens.cache_read;
                 row.cache_write_tokens += record.tokens.cache_write;
+                // Rate limits belong to the account, so the newest report among the sessions wins.
+                let newer = |limit: &PlanLimit| row.plan_limit.as_ref().is_none_or(|kept| limit.reported_ms > kept.reported_ms);
+                if let Some(limit) = record.plan_limit.as_ref().filter(|limit| newer(limit)) {
+                    row.plan_limit = Some(limit.clone());
+                }
             }
             rows.push(row);
         }
         rows
+    }
+
+    /// Claude Code's subscription meter. Session logs carry no plan data, but Claude Code keeps the
+    /// numbers its own `/usage` view shows in `~/.claude.json`. Reading that file needs no sign-in.
+    fn claude_plan_limit(&self, home: &Path) -> Option<PlanLimit> {
+        let path = home.join(".claude.json");
+        let meta = fs::metadata(&path).ok()?;
+        let len = meta.len();
+        let modified_ms = millis_since_epoch(meta.modified().ok()?)?;
+        {
+            let kept = self.claude_plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(hit) = kept.as_ref().filter(|hit| hit.len == len && hit.modified_ms == modified_ms) {
+                return hit.limit.clone();
+            }
+        }
+        let limit = fs::read_to_string(&path).ok().and_then(|text| parse_claude_plan(&text));
+        *self.claude_plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedPlan {
+            len,
+            modified_ms,
+            limit: limit.clone(),
+        });
+        limit
     }
 
     fn entries(&self) -> MutexGuard<'_, HashMap<PathBuf, CachedSession>> {
@@ -254,6 +326,56 @@ impl UsageReader {
     }
 }
 
+/// The subscription meter from Claude Code's account file: the plan, and the five-hour and
+/// seven-day windows it last fetched. A cached meter that belongs to another account than the one
+/// signed in is ignored, and the account's identifiers never leave this function.
+pub fn parse_claude_plan(text: &str) -> Option<PlanLimit> {
+    let root: Value = serde_json::from_str(text).ok()?;
+    let cached = root.get("cachedUsageUtilization")?;
+    let signed_in = root.pointer("/oauthAccount/accountUuid").and_then(Value::as_str);
+    if signed_in.is_none() || cached.get("accountUuid").and_then(Value::as_str) != signed_in {
+        return None;
+    }
+    let utilization = cached.get("utilization")?;
+    let window = |key: &str, minutes: u64| {
+        let value = utilization.get(key).filter(|value| value.is_object())?;
+        Some(PlanWindow {
+            used_percent: value.get("utilization").and_then(Value::as_f64)?.clamp(0.0, 100.0),
+            window_minutes: Some(minutes),
+            resets_at: value
+                .get("resets_at")
+                .and_then(Value::as_str)
+                .and_then(parse_utc_offset_ms)
+                .map(|ms| ms.div_euclid(1_000)),
+        })
+    };
+    let (primary, secondary) = (window("five_hour", 300), window("seven_day", 10_080));
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    let plan = root
+        .pointer("/oauthAccount/organizationType")
+        .and_then(Value::as_str)
+        .map(|kind| kind.strip_prefix("claude_").unwrap_or(kind).to_string());
+    let reached = [&primary, &secondary].into_iter().flatten().any(|window| window.used_percent >= 100.0);
+    Some(PlanLimit {
+        plan,
+        primary,
+        secondary,
+        reached,
+        reported_ms: cached.get("fetchedAtMs").and_then(Value::as_i64).unwrap_or(0),
+    })
+}
+
+/// Epoch ms for an ISO-8601 timestamp written with a UTC offset (`+00:00`) or `Z`. Any other offset
+/// gives `None`.
+fn parse_utc_offset_ms(text: &str) -> Option<i64> {
+    let utc = text.strip_suffix("+00:00").map(|body| format!("{body}Z"));
+    let text = utc.as_deref().unwrap_or(text);
+    // Claude writes microseconds, which `parse_iso_ms` reads down to milliseconds.
+    parse_iso_ms(text)
+}
+
 /// Reads a Claude session. Each reply is written as several lines that all repeat the same usage,
 /// so usage is kept once per `requestId`. Most of a session is tool output and prose, so only
 /// lines that mention usage, or lines still needed for identity, are parsed as JSON.
@@ -355,6 +477,7 @@ fn codex_head_belongs(path: &Path, cwds: Option<&BTreeSet<String>>, window: &Win
 pub fn parse_codex_rollout(text: &str) -> SessionRecord {
     let mut record = SessionRecord::default();
     let mut latest: Option<Tokens> = None;
+    let mut plan_limit: Option<PlanLimit> = None;
     for line in text.lines() {
         let needs_identity = record.cwd.is_none() || record.started_ms.is_none();
         let mentions_tokens = line.contains("token_count");
@@ -375,10 +498,40 @@ pub fn parse_codex_rollout(text: &str) -> SessionRecord {
             if let Some(total) = payload.pointer("/info/total_token_usage") {
                 latest = Some(codex_tokens(total));
             }
+            // A report can carry the plan's limits even when it has no token totals.
+            let reported_ms = value.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms);
+            if let Some(limit) = payload.get("rate_limits").and_then(|limits| codex_plan_limit(limits, reported_ms)) {
+                plan_limit = Some(limit);
+            }
         }
     }
     record.tokens = latest.unwrap_or_default();
+    record.plan_limit = plan_limit;
     record
+}
+
+/// The plan's usage meter from a `token_count` report's `rate_limits`. `None` when the report has no
+/// window at all, since there is nothing to show then.
+fn codex_plan_limit(limits: &Value, reported_ms: Option<i64>) -> Option<PlanLimit> {
+    let window = |key: &str| {
+        let value = limits.get(key).filter(|value| value.is_object())?;
+        Some(PlanWindow {
+            used_percent: value.get("used_percent").and_then(Value::as_f64)?.clamp(0.0, 100.0),
+            window_minutes: value.get("window_minutes").and_then(Value::as_u64),
+            resets_at: value.get("resets_at").and_then(Value::as_i64),
+        })
+    };
+    let (primary, secondary) = (window("primary"), window("secondary"));
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    Some(PlanLimit {
+        plan: limits.get("plan_type").and_then(Value::as_str).map(str::to_string),
+        primary,
+        secondary,
+        reached: limits.get("rate_limit_reached_type").is_some_and(|reached| !reached.is_null()),
+        reported_ms: reported_ms.unwrap_or(0),
+    })
 }
 
 fn codex_tokens(total: &Value) -> Tokens {
@@ -739,5 +892,80 @@ not json at all
         grown.push_str(&line("r2", 40));
         fs::write(&path, grown).unwrap();
         assert_eq!(reader.measure(home.path(), &providers, &window)[0].input_tokens, 140);
+    }
+
+    #[test]
+    fn codex_reports_the_plan_limits_of_the_last_report_in_a_session() {
+        let text = [
+            r#"{"timestamp":"2026-11-26T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/work/repo","timestamp":"2026-11-26T10:00:00.000Z"}}"#,
+            r#"{"timestamp":"2026-11-26T10:01:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"plan_type":"free","primary":{"used_percent":4.0,"window_minutes":43200,"resets_at":1798267758},"secondary":null,"rate_limit_reached_type":null}}}"#,
+            r#"{"timestamp":"2026-11-26T10:04:45.037Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10}},"rate_limits":{"plan_type":"free","primary":{"used_percent":9.0,"window_minutes":43200,"resets_at":1798267758},"secondary":null,"rate_limit_reached_type":null}}}"#,
+        ]
+        .join("\n");
+        let limit = parse_codex_rollout(&text).plan_limit.expect("a plan limit");
+        assert_eq!(limit.plan.as_deref(), Some("free"));
+        let primary = limit.primary.expect("primary window");
+        assert_eq!((primary.used_percent, primary.window_minutes, primary.resets_at), (9.0, Some(43200), Some(1798267758)));
+        assert!(limit.secondary.is_none() && !limit.reached);
+        assert_eq!(Some(limit.reported_ms), parse_iso_ms("2026-11-26T10:04:45.037Z"));
+    }
+
+    #[test]
+    fn a_report_without_any_window_or_a_reached_limit_is_handled() {
+        let none = serde_json::json!({ "plan_type": "free", "primary": null, "secondary": null });
+        assert!(codex_plan_limit(&none, Some(1)).is_none());
+
+        let hit = serde_json::json!({
+            "plan_type": "plus",
+            "primary": { "used_percent": 140.0, "window_minutes": 300, "resets_at": 5 },
+            "rate_limit_reached_type": "primary"
+        });
+        let limit = codex_plan_limit(&hit, Some(7)).unwrap();
+        assert!(limit.reached);
+        assert_eq!(limit.primary.unwrap().used_percent, 100.0, "out-of-range percentages are clamped");
+    }
+
+    fn claude_account(account: &str, cached_for: &str) -> String {
+        format!(
+            r#"{{"oauthAccount":{{"accountUuid":"{account}","organizationType":"claude_pro","emailAddress":"x@example.com"}},
+               "cachedUsageUtilization":{{"fetchedAtMs":1795688263677,"accountUuid":"{cached_for}","utilization":{{
+                 "five_hour":{{"utilization":68,"resets_at":"2026-11-26T12:59:59.556146+00:00"}},
+                 "seven_day":{{"utilization":55,"resets_at":"2026-11-27T13:59:59.556166+00:00"}},
+                 "seven_day_opus":null}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn claude_plan_comes_from_the_cached_usage_in_the_account_file() {
+        let limit = parse_claude_plan(&claude_account("a1", "a1")).expect("a plan limit");
+        assert_eq!(limit.plan.as_deref(), Some("pro"));
+        let (five, seven) = (limit.primary.unwrap(), limit.secondary.unwrap());
+        assert_eq!((five.used_percent, five.window_minutes), (68.0, Some(300)));
+        assert_eq!((seven.used_percent, seven.window_minutes), (55.0, Some(10_080)));
+        assert_eq!(five.resets_at, parse_iso_ms("2026-11-26T12:59:59.556Z").map(|ms| ms / 1_000));
+        assert_eq!(limit.reported_ms, 1795688263677);
+        assert!(!limit.reached);
+    }
+
+    #[test]
+    fn a_meter_cached_for_another_account_or_missing_is_ignored() {
+        assert!(parse_claude_plan(&claude_account("a1", "someone-else")).is_none());
+        assert!(parse_claude_plan(r#"{"cachedUsageUtilization":{"accountUuid":"a1","utilization":{}}}"#).is_none());
+        assert!(parse_claude_plan(r#"{"oauthAccount":{"accountUuid":"a1"}}"#).is_none());
+        assert!(parse_claude_plan("not json").is_none());
+    }
+
+    #[test]
+    fn the_claude_account_file_is_read_through_the_reader_and_follows_its_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let reader = UsageReader::default();
+        assert!(reader.claude_plan_limit(home.path()).is_none(), "no account file, no plan");
+
+        fs::write(home.path().join(".claude.json"), claude_account("a1", "a1")).unwrap();
+        assert_eq!(reader.claude_plan_limit(home.path()).unwrap().plan.as_deref(), Some("pro"));
+
+        // A different length means the file changed, so it is read again.
+        fs::write(home.path().join(".claude.json"), claude_account("a1", "a1").replace("claude_pro", "claude_team")).unwrap();
+        assert_eq!(reader.claude_plan_limit(home.path()).unwrap().plan.as_deref(), Some("team"));
     }
 }

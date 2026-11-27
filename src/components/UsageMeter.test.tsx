@@ -66,4 +66,24 @@ describe("UsageMeter", () => {
     expect(barWidth(markup, "Claude Code")).toBe("0");
     expect(markup).toContain("0 tokens");
   });
+
+  it("is a floating card with a heading, and each provider carries its logo", () => {
+    const markup = renderToStaticMarkup(
+      <UsageMeter live rows={[row({ provider: "claude" }), row({ provider: "gemini", measured: false, sessions: 0 })]} />,
+    );
+    expect(markup).toMatch(/<section aria-label="Provider usage"/);
+    expect(markup).toContain(">Usage</h2>");
+    // Badges are decorative, so they are hidden from assistive technology.
+    expect(markup).toMatch(/aria-hidden="true"[^>]*><svg viewBox="0 0 24 24"/);
+    expect(markup).toContain('fill="#D97757"');
+    expect(markup).toContain('fill="#8E75B2"');
+  });
+
+  it("gives every provider its own logo, Codex included", () => {
+    const providers = ["claude", "codex", "gemini", "opencode"] as const;
+    const markup = renderToStaticMarkup(<UsageMeter live rows={providers.map((provider) => row({ provider }))} />);
+    for (const provider of providers) expect(markup).toContain(`data-provider-icon="${provider}"`);
+    expect(markup).toContain('fill="#10A37F"');
+    expect(markup.match(/<svg/g)).toHaveLength(providers.length);
+  });
 });

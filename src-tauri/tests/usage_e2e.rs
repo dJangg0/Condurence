@@ -14,12 +14,12 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use open_conductor_lib::git::locks::RepoLocks;
-use open_conductor_lib::graph::{default_graph, OrchestrationGraph, RelationType};
-use open_conductor_lib::mcp::{router::Router, server};
-use open_conductor_lib::pty::PtyManager;
-use open_conductor_lib::runtime::{events::EventSink, now_ms, state_db::StateDb};
-use open_conductor_lib::usage::{self, ProviderUsage, UsageReader};
+use condurence_lib::git::locks::RepoLocks;
+use condurence_lib::graph::{default_graph, OrchestrationGraph, RelationType};
+use condurence_lib::mcp::{router::Router, server};
+use condurence_lib::pty::PtyManager;
+use condurence_lib::runtime::{events::EventSink, now_ms, state_db::StateDb};
+use condurence_lib::usage::{self, ProviderUsage, UsageReader};
 use serde_json::{json, Value};
 
 const EDGE_ID: &str = "e-ceo-senior-dev";
@@ -82,7 +82,7 @@ impl EventSink for RecordingSink {
 }
 
 fn build_router(db: Arc<StateDb>, provider: &Path) -> (Arc<Router>, Arc<RecordingSink>) {
-    std::env::set_var("OPENCONDUCTOR_CLAUDE_BIN", provider);
+    std::env::set_var("CONDURENCE_CLAUDE_BIN", provider);
     let sink = Arc::new(RecordingSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
     let pty = Arc::new(PtyManager::new(events.clone()));
@@ -211,9 +211,12 @@ async fn usage_meter_end_to_end() {
     let finished = wait_for(Duration::from_secs(30), || sink.saw_status(&run_id, "ceo", "idle")).await;
     assert!(finished, "the root CLI never finished");
 
-    // 2. While the run is live, the run meter sees the session with duplicates counted once.
-    let live = db.run_usage_inputs(&run_id).unwrap().expect("the run is recorded");
-    assert_eq!(live.ended_ms, None, "a live run has no end time yet");
+    // 2. The root exiting finishes the run, so its window closes there. The run meter sees the
+    //    session, with duplicates counted once.
+    let finished_run = db.run_usage_inputs(&run_id).unwrap().expect("the run is recorded");
+    let root_exit = finished_run.ended_ms.expect("a finished run has an end time");
+    assert!(root_exit >= finished_run.started_ms);
+    let live = finished_run;
     assert_eq!(live.commands, ["claude"]);
     let repo_path = repo.to_string_lossy().into_owned();
     assert!(live.cwds.contains(&repo_path), "the root's directory is recorded: {:?}", live.cwds);

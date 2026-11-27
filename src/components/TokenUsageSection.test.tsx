@@ -75,4 +75,90 @@ describe("TokenUsageSection", () => {
     );
     expect(markup).not.toContain("No CLI sessions");
   });
+
+  it("shows the ChatGPT plan's own usage meter under Codex", () => {
+    const farFuture = 4_102_444_800; // 2100-01-01, so the window has not reset
+    const markup = renderToStaticMarkup(
+      <TokenUsageSection
+        error={null}
+        rows={[
+          row({
+            provider: "codex",
+            sessions: 4,
+            inputTokens: 1000,
+            planLimit: {
+              plan: "free",
+              primary: { usedPercent: 9, windowMinutes: 43_200, resetsAt: farFuture },
+              secondary: null,
+              reached: false,
+              reportedMs: 1,
+            },
+          }),
+          row({ provider: "claude", sessions: 1, inputTokens: 10 }),
+        ]}
+      />,
+    );
+    expect(markup).toContain('aria-label="Free plan, 30-day limit"');
+    expect(markup).toContain("Free plan · 30-day");
+    expect(markup).toContain("9% used");
+    expect(markup).toMatch(/aria-valuenow="9"/);
+    expect(markup).not.toContain("Limit reached");
+    // Providers without a plan report get no plan meter.
+    expect(markup.match(/plan limits/g)?.length).toBe(1);
+  });
+
+  it("flags a reached limit and shows a window that has since reset as reset", () => {
+    const markup = renderToStaticMarkup(
+      <TokenUsageSection
+        error={null}
+        rows={[
+          row({
+            provider: "codex",
+            sessions: 1,
+            inputTokens: 5,
+            planLimit: {
+              plan: "plus",
+              primary: { usedPercent: 100, windowMinutes: 300, resetsAt: 1 },
+              secondary: { usedPercent: 100, windowMinutes: 10_080, resetsAt: 4_102_444_800 },
+              reached: true,
+              reportedMs: 1,
+            },
+          }),
+        ]}
+      />,
+    );
+    expect(markup).toContain("Plus plan · 5-hour");
+    expect(markup).toContain(">reset<");
+    expect(markup).toContain("Plus plan · weekly");
+    expect(markup).toContain("100% used");
+    expect(markup).toContain("Limit reached");
+  });
+
+  it("shows the Claude subscription meter with its five-hour and weekly windows and how old the report is", () => {
+    const farFuture = 4_102_444_800;
+    const markup = renderToStaticMarkup(
+      <TokenUsageSection
+        error={null}
+        rows={[
+          row({
+            provider: "claude",
+            sessions: 2,
+            inputTokens: 100,
+            planLimit: {
+              plan: "pro",
+              primary: { usedPercent: 68, windowMinutes: 300, resetsAt: farFuture },
+              secondary: { usedPercent: 55, windowMinutes: 10_080, resetsAt: farFuture },
+              reached: false,
+              reportedMs: Date.now() - 3 * 3_600_000,
+            },
+          }),
+        ]}
+      />,
+    );
+    expect(markup).toContain("Pro plan · 5-hour");
+    expect(markup).toContain("68% used");
+    expect(markup).toContain("Pro plan · weekly");
+    expect(markup).toContain("55% used");
+    expect(markup).toContain("updated 3 h ago");
+  });
 });
