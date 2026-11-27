@@ -16,7 +16,9 @@ use crate::models::{self, ModelOption};
 use crate::pty::SpawnSpec;
 use crate::pulls;
 use crate::usage::{self, ProviderUsage};
-use crate::runtime::{now_ms, state_db::{RepoRecord, RunEvent}, CoreRuntime, RepoMetadata};
+use crate::runtime::{now_ms, state_db::{RepoRecord, RunEvent, RunRecord, StateDb}, CoreRuntime, RepoMetadata};
+use crate::settings::{self, RepoGitSettings};
+use crate::workspaces;
 
 type Runtime<'a> = State<'a, Arc<CoreRuntime>>;
 
@@ -89,14 +91,40 @@ pub async fn create_worktree(
     .await
 }
 
+/// What archiving a workspace would discard and keep, for its confirmation. Changes nothing.
 #[tauri::command]
-pub async fn remove_worktree(
+pub async fn archive_preview(
     runtime: Runtime<'_>,
     repo_path: String,
-    branch_name: String,
+    worktree_path: String,
+    branch: Option<String>,
+) -> AppResult<workspaces::ArchivePreview> {
+    let settings = repo_settings(&runtime.db, &repo_path)?;
+    workspaces::archive_preview(gh_binary().as_deref(), Path::new(&worktree_path), branch.as_deref(), &settings.remote).await
+}
+
+/// Archives a workspace on the user's request: removes its folder and, when the repository's
+/// settings say so and nothing is lost, its branch. Uncommitted changes need `discard_changes`.
+#[tauri::command]
+pub async fn archive_workspace(
+    runtime: Runtime<'_>,
+    repo_path: String,
+    branch: Option<String>,
     folder_name: String,
-) -> AppResult<()> {
-    worktree::remove_worktree(&runtime.locks, Path::new(&repo_path), &branch_name, &folder_name).await
+    discard_changes: bool,
+) -> AppResult<workspaces::ArchiveOutcome> {
+    let settings = repo_settings(&runtime.db, &repo_path)?;
+    workspaces::archive_workspace(
+        &runtime.locks,
+        gh_binary().as_deref(),
+        Path::new(&repo_path),
+        branch.as_deref(),
+        &folder_name,
+        &settings.remote,
+        settings.delete_branch_on_archive,
+        discard_changes,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -110,9 +138,31 @@ pub async fn merge_worktree(
     worktree::merge_worktree(&runtime.locks, Path::new(&repo_path), &branch_name, &target_branch, squash).await
 }
 
+/// What a branch would put in a PR: its commits since the base. Uncommitted edits are not included.
+#[tauri::command]
+pub async fn get_branch_diff(worktree_path: String, base: String) -> AppResult<Vec<FileDiff>> {
+    if !settings::valid_name(&base) {
+        crate::error::bail!("'{base}' is not a valid base");
+    }
+    git::diff_engine::branch_diff(Path::new(&worktree_path), &base).await
+}
+
 #[tauri::command]
 pub async fn get_git_diff(worktree_path: String) -> AppResult<Vec<FileDiff>> {
     git::diff_engine::worktree_diff(&PathBuf::from(worktree_path)).await
+}
+
+/// Every file of a workspace that git lists, for the All files tab.
+#[tauri::command]
+pub async fn list_worktree_files(worktree_path: String) -> AppResult<git::files::FileListing> {
+    git::files::list_files(Path::new(&worktree_path)).await
+}
+
+/// The text of one listed file. Ignored files, paths outside the workspace and links that lead out
+/// of it are refused.
+#[tauri::command]
+pub async fn read_worktree_file(worktree_path: String, path: String) -> AppResult<git::files::FileContent> {
+    git::files::read_file(Path::new(&worktree_path), &path).await
 }
 
 /// Starts the debounced watcher for a worktree and returns its workspace id.
@@ -130,7 +180,7 @@ pub fn unwatch_workspace(runtime: Runtime<'_>, worktree_path: String) {
 
 // ---------------------------------------------------------------- github
 
-/// The `gh` binary. `OPENCONDUCTOR_GH_BIN` pins an explicit build, as it does for provider CLIs.
+/// The `gh` binary. `CONDURENCE_GH_BIN` pins an explicit build, as it does for provider CLIs.
 fn gh_binary() -> Option<PathBuf> {
     resolver::resolve_provider("gh")
 }
@@ -162,10 +212,14 @@ pub async fn github_connect_repository(repo_path: String, name_with_owner: Strin
     github::connect_repository(gh_binary().as_deref(), &root, &name_with_owner).await
 }
 
-/// Clones a repository from the signed-in account into `~/OpenConductor/repos` and returns its path.
+/// Clones a repository from the signed-in account into `~/Condurence/repos` and returns its path.
+/// A copy already cloned into the folder the app used before its rename is opened as it is.
 #[tauri::command]
 pub async fn github_clone_repository(name_with_owner: String) -> AppResult<String> {
     let home = crate::runtime::home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    if let Some(existing) = github::existing_clone(&github::legacy_clone_root(&home), &name_with_owner).await {
+        return Ok(existing.to_string_lossy().into_owned());
+    }
     let root = github::default_clone_root(&home);
     let path = github::clone_repository(gh_binary().as_deref(), &root, &name_with_owner).await?;
     Ok(path.to_string_lossy().into_owned())
@@ -193,23 +247,45 @@ pub fn github_start_sign_in(runtime: Runtime<'_>, session_id: String) -> AppResu
 // ---------------------------------------------------------------- pull requests
 
 #[tauri::command]
-pub async fn pull_request_status(worktree_path: String, branch: String) -> AppResult<Option<pulls::PullRequestStatus>> {
-    pulls::status(gh_binary().as_deref(), Path::new(&worktree_path), &branch).await
+pub async fn pull_request_status(
+    worktree_path: String,
+    branch: String,
+    remote: String,
+) -> AppResult<Option<pulls::PullRequestStatus>> {
+    pulls::status(gh_binary().as_deref(), Path::new(&worktree_path), &branch, &remote).await
+}
+
+/// Every PR in the repository with the branch it came from. The sidebar reads this once per repository
+/// to show each workspace's merge state.
+#[tauri::command]
+pub async fn list_pull_requests(runtime: Runtime<'_>, repo_path: String) -> AppResult<Vec<pulls::BranchPull>> {
+    let remote = repo_settings(&runtime.db, &repo_path)?.remote;
+    pulls::list(gh_binary().as_deref(), Path::new(&repo_path), &remote).await
 }
 
 #[tauri::command]
-pub async fn create_pull_request(worktree_path: String, branch: String, base: String) -> AppResult<pulls::PullRequestStatus> {
-    pulls::create(gh_binary().as_deref(), Path::new(&worktree_path), &branch, &base).await
+pub async fn create_pull_request(
+    worktree_path: String,
+    branch: String,
+    base: String,
+    remote: String,
+) -> AppResult<pulls::PullRequestStatus> {
+    pulls::create(gh_binary().as_deref(), Path::new(&worktree_path), &branch, &base, &remote).await
 }
 
 #[tauri::command]
-pub async fn merge_pull_request(worktree_path: String, branch: String) -> AppResult<pulls::PullRequestStatus> {
-    pulls::merge(gh_binary().as_deref(), Path::new(&worktree_path), &branch).await
+pub async fn merge_pull_request(worktree_path: String, branch: String, remote: String) -> AppResult<pulls::PullRequestStatus> {
+    pulls::merge(gh_binary().as_deref(), Path::new(&worktree_path), &branch, &remote).await
 }
 
 #[tauri::command]
-pub async fn sync_with_base(worktree_path: String, branch: String, base: String) -> AppResult<pulls::SyncOutcome> {
-    pulls::sync_with_base(Path::new(&worktree_path), &branch, &base).await
+pub async fn sync_with_base(
+    worktree_path: String,
+    branch: String,
+    base: String,
+    remote: String,
+) -> AppResult<pulls::SyncOutcome> {
+    pulls::sync_with_base(Path::new(&worktree_path), &branch, &base, &remote).await
 }
 
 /// Opens Claude in the workspace on a `review` or `resolve` prompt. The prompt is built in the
@@ -234,6 +310,41 @@ pub fn start_agent_task(
         session_id,
         cwd,
         program: claude.to_string_lossy().into_owned(),
+        args: vec![prompt],
+        env: vec![],
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+    })?;
+    Ok(())
+}
+
+/// Starts a review in a worktree with the agent the user chose and the context they configured. The
+/// agent runs in a terminal that stays open, so the reviewer's findings are read where they appear.
+#[tauri::command]
+pub fn start_review(
+    runtime: Runtime<'_>,
+    session_id: String,
+    worktree_path: String,
+    base: String,
+    agent: String,
+    context: pulls::ReviewContext,
+) -> AppResult<()> {
+    let provider = parse_provider(&agent)?;
+    if !matches!(provider, AgentProvider::Claude | AgentProvider::Codex) {
+        crate::error::bail!("Reviews run with Claude or Codex");
+    }
+    let program = resolver::resolve_provider(provider.binary())
+        .ok_or_else(|| AppError::msg(format!("'{}' was not found on your PATH", provider.binary())))?;
+    let cwd = PathBuf::from(&worktree_path);
+    if !cwd.is_dir() {
+        crate::error::bail!("'{worktree_path}' is not a directory");
+    }
+    let prompt = pulls::review_prompt(&base, &context)?;
+    runtime.db.record_pty_session(&session_id, None, None, &cwd, provider.binary(), now_ms())?;
+    runtime.pty.spawn(SpawnSpec {
+        session_id,
+        cwd,
+        program: program.to_string_lossy().into_owned(),
         args: vec![prompt],
         env: vec![],
         cols: DEFAULT_COLS,
@@ -381,6 +492,121 @@ pub fn resolve_approval_gate(runtime: Runtime<'_>, run_id: String, edge_id: Stri
 #[tauri::command]
 pub fn list_run_events(runtime: Runtime<'_>, run_id: String, limit: Option<i64>) -> AppResult<Vec<RunEvent>> {
     runtime.db.list_events(&run_id, limit.unwrap_or(500))
+}
+
+/// The Git settings of a repository, or the defaults until they are first saved.
+fn repo_settings(db: &StateDb, repo_path: &str) -> AppResult<RepoGitSettings> {
+    Ok(settings::parse(db.repo_settings_json(repo_path)?.as_deref()))
+}
+
+/// Creates a workspace the Conductor way: a champion-named branch from the repository's base.
+#[tauri::command]
+pub async fn create_workspace(runtime: Runtime<'_>, repo_path: String) -> AppResult<WorktreeInfo> {
+    let settings = repo_settings(&runtime.db, &repo_path)?;
+    let seed = uuid::Uuid::new_v4().as_u128() as u64;
+    workspaces::create_workspace(&runtime.locks, Path::new(&repo_path), &settings, seed).await
+}
+
+#[tauri::command]
+pub fn get_repo_git_settings(runtime: Runtime<'_>, repo_path: String) -> AppResult<RepoGitSettings> {
+    repo_settings(&runtime.db, &repo_path)
+}
+
+#[tauri::command]
+pub fn save_repo_git_settings(runtime: Runtime<'_>, repo_path: String, settings: RepoGitSettings) -> AppResult<()> {
+    settings.validate()?;
+    let json = serde_json::to_string(&settings)?;
+    runtime.db.put_repo_settings_json(&repo_path, &json)
+}
+
+#[tauri::command]
+pub async fn list_remotes(repo_path: String) -> AppResult<Vec<String>> {
+    git::remotes::list_remotes(Path::new(&repo_path)).await
+}
+
+#[tauri::command]
+pub async fn list_remote_branches(repo_path: String, remote: String) -> AppResult<Vec<String>> {
+    if !settings::valid_name(&remote) {
+        crate::error::bail!("'{remote}' is not a valid remote name");
+    }
+    git::remotes::list_remote_branches(Path::new(&repo_path), &remote).await
+}
+
+/// Runs started from a repository, newest first. Backs the run history.
+#[tauri::command]
+pub fn list_runs(runtime: Runtime<'_>, repo_path: String, limit: Option<i64>) -> AppResult<Vec<RunRecord>> {
+    runtime.db.list_runs(&repo_path, limit.unwrap_or(20))
+}
+
+/// The worktrees a run's agents worked in, with their branches. The repository root is included
+/// and flagged `isMain`, so the caller can leave it out of PR actions.
+#[tauri::command]
+pub async fn run_worktrees(runtime: Runtime<'_>, run_id: String) -> AppResult<Vec<WorktreeInfo>> {
+    let Some(inputs) = runtime.db.run_usage_inputs(&run_id)? else {
+        return Ok(Vec::new());
+    };
+    let all = worktree::list_worktrees(Path::new(&inputs.repo_path)).await?;
+    Ok(select_run_worktrees(all, &inputs.cwds))
+}
+
+/// Keeps the worktrees whose path is one of the run's working directories, in git's order.
+pub fn select_run_worktrees(all: Vec<WorktreeInfo>, cwds: &[String]) -> Vec<WorktreeInfo> {
+    let wanted: std::collections::BTreeSet<PathBuf> = cwds.iter().map(|cwd| canonical_path(cwd)).collect();
+    all.into_iter().filter(|info| wanted.contains(&canonical_path(&info.path))).collect()
+}
+
+fn canonical_path(path: &str) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
+/// Moves a workspace that sits on the base branch onto a new branch, so its work can be a PR.
+/// Its commits and uncommitted edits come along. On the user's explicit request only.
+#[tauri::command]
+pub async fn start_branch(worktree_path: String, branch: String) -> AppResult<()> {
+    pulls::start_branch(Path::new(&worktree_path), &branch).await
+}
+
+/// Commits a worktree's changes with `message`, on the user's explicit request. Returns the new
+/// commit, or `None` when there was nothing to commit.
+#[tauri::command]
+pub async fn commit_worktree_changes(worktree_path: String, message: String) -> AppResult<Option<String>> {
+    pulls::commit_changes(Path::new(&worktree_path), &message).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worktree(path: &str, branch: Option<&str>, is_main: bool) -> WorktreeInfo {
+        WorktreeInfo {
+            path: path.into(),
+            branch: branch.map(str::to_string),
+            head: "abc".into(),
+            is_main,
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn a_run_sees_only_its_own_worktrees_including_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let child = dir.path().join("repo/.worktrees/a-greeter-1");
+        let other = dir.path().join("other");
+        for path in [&root, &child, &other] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let all = vec![
+            worktree(root.to_str().unwrap(), Some("main"), true),
+            worktree(child.to_str().unwrap(), Some("oc/a/greeter-1"), false),
+            worktree(other.to_str().unwrap(), Some("feature"), false),
+        ];
+        // The run recorded the root (as a session's cwd) and the child, but not the other worktree.
+        let cwds = vec![root.to_string_lossy().into_owned(), child.to_string_lossy().into_owned()];
+        let picked = select_run_worktrees(all, &cwds);
+        assert_eq!(picked.iter().map(|w| w.branch.as_deref()).collect::<Vec<_>>(), [Some("main"), Some("oc/a/greeter-1")]);
+        assert!(picked[0].is_main);
+    }
 }
 
 /// Token usage each provider's CLI recorded for one run. Unknown runs report no rows.

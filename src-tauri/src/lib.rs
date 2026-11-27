@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod env;
 pub mod error;
+pub mod gates;
 pub mod git;
 pub mod github;
 pub mod graph;
@@ -13,7 +14,9 @@ pub mod models;
 pub mod pty;
 pub mod pulls;
 pub mod runtime;
+pub mod settings;
 pub mod usage;
+pub mod workspaces;
 
 use std::sync::Arc;
 
@@ -49,7 +52,8 @@ pub fn run() {
             ipc::commands::save_graph,
             ipc::commands::list_worktrees,
             ipc::commands::create_worktree,
-            ipc::commands::remove_worktree,
+            ipc::commands::archive_preview,
+            ipc::commands::archive_workspace,
             ipc::commands::merge_worktree,
             ipc::commands::get_git_diff,
             ipc::commands::github_account_status,
@@ -59,6 +63,7 @@ pub fn run() {
             ipc::commands::github_clone_repository,
             ipc::commands::github_start_sign_in,
             ipc::commands::pull_request_status,
+            ipc::commands::list_pull_requests,
             ipc::commands::create_pull_request,
             ipc::commands::merge_pull_request,
             ipc::commands::sync_with_base,
@@ -77,6 +82,19 @@ pub fn run() {
             ipc::commands::stop_orchestration_run,
             ipc::commands::resolve_approval_gate,
             ipc::commands::list_run_events,
+            ipc::commands::list_runs,
+            ipc::commands::run_worktrees,
+            ipc::commands::commit_worktree_changes,
+            ipc::commands::start_branch,
+            ipc::commands::create_workspace,
+            ipc::commands::get_branch_diff,
+            ipc::commands::list_worktree_files,
+            ipc::commands::read_worktree_file,
+            ipc::commands::start_review,
+            ipc::commands::get_repo_git_settings,
+            ipc::commands::save_repo_git_settings,
+            ipc::commands::list_remotes,
+            ipc::commands::list_remote_branches,
             ipc::commands::run_usage,
             ipc::commands::provider_usage_summary,
         ])

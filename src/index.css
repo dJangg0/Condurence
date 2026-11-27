@@ -123,3 +123,15 @@ body {
     animation: oc-splash-rise 500ms ease-out 650ms both;
   }
 }
+
+/*
+ * A view that stays mounted but is out of sight, such as the orchestration canvas while another view
+ * is open. It is hidden with `visibility`, not `display`, so it keeps its layout size and a terminal
+ * inside it is not resized to nothing. `visibility` is inherited, but a child that sets its own
+ * shows through: React Flow sets `visibility: visible` on every node. So every descendant is forced
+ * hidden here, and `!important` is what beats an inline style.
+ */
+.view-hidden,
+.view-hidden * {
+  visibility: hidden !important;
+}
