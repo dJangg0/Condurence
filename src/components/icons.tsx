@@ -134,3 +134,44 @@ export function TerminalIcon({ className }: IconProps) {
     </svg>
   );
 }
+
+/** Two nodes joined by a curve, the pull request glyph. */
+export function PullRequestIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="4.5" cy="3.5" r="1.5" />
+      <circle cx="4.5" cy="12.5" r="1.5" />
+      <circle cx="11.5" cy="12.5" r="1.5" />
+      <path d="M4.5 5v6M11.5 11V7a2 2 0 0 0-2-2H8m0 0l1.5-1.5M8 5l1.5 1.5" />
+    </svg>
+  );
+}
+
+export function FolderIcon({ className, open }: IconProps & { open?: boolean }) {
+  return (
+    <svg {...base} className={className}>
+      {open ? (
+        <path d="M2 5.5V4a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V6M2 5.5h12l-1.2 6.2a1 1 0 0 1-1 .8H3.2a1 1 0 0 1-1-.8L2 5.5z" />
+      ) : (
+        <path d="M2 4a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4z" />
+      )}
+    </svg>
+  );
+}
+
+export function FileIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M4 2.5h5l3 3V13a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 4 13V2.5zM9 2.5V6h3" />
+    </svg>
+  );
+}
+
+export function SearchIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="7" cy="7" r="4" />
+      <path d="M10 10l3.5 3.5" />
+    </svg>
+  );
+}

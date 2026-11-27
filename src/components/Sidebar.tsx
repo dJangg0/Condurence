@@ -14,8 +14,17 @@ import { ProfileMenu } from "./ProfileMenu";
 import type { Connections } from "../lib/connections";
 import type { Preferences } from "../lib/preferences";
 import type { RepoRecord, WorktreeInfo } from "../types/orchestration";
+import type { BranchPull } from "../types/pulls";
+import { mergeStatus, pullForBranch, type MergeStatus } from "../lib/branchMerge";
 
 export type ViewMode = "workspaces" | "orchestration";
+
+/** The merge pill in a workspace row. Only "Merged" reads as finished. */
+const STATUS_TONES: Record<MergeStatus["kind"], string> = {
+  merged: "bg-emerald-500/15 text-emerald-300",
+  open: "bg-indigo-500/15 text-indigo-300",
+  unmerged: "bg-zinc-800 text-zinc-500",
+};
 
 const VIEWS: Array<{ id: ViewMode; label: string; hint: string; Icon: typeof WorkspacesIcon }> = [
   { id: "workspaces", label: "Workspaces", hint: "Isolated worktrees, diffs and terminals", Icon: WorkspacesIcon },
@@ -38,9 +47,16 @@ type SidebarProps = {
   archived: RepoRecord[];
   /** Workspaces per repository path. A repository missing here has not loaded yet. */
   worktrees: Record<string, WorktreeInfo[]>;
+  /** Each repository's PRs. A workspace shows its merge state once its repository's list has loaded. */
+  branchPulls: Record<string, BranchPull[]>;
   onOpenRepository: () => void;
   onSelectWorktree: (repoPath: string, worktreePath: string) => void;
+  /** Creates a workspace straight away on a fresh branch from the repository's base. */
   onCreateWorkspace: (repoPath: string) => void;
+  /** Opens the archive confirmation for one temporary workspace. The main checkout has none. */
+  onArchiveWorkspace: (repoPath: string, worktree: WorktreeInfo) => void;
+  /** Opens the repository's Git settings. */
+  onOpenRepoSettings: (repoPath: string) => void;
   onArchive: (path: string, archived: boolean) => void;
   onRemove: (path: string) => void;
   settingsActive: boolean;
@@ -67,9 +83,12 @@ export function Sidebar({
   recent,
   archived,
   worktrees,
+  branchPulls,
   onOpenRepository,
   onSelectWorktree,
+  onArchiveWorkspace,
   onCreateWorkspace,
+  onOpenRepoSettings,
   onArchive,
   onRemove,
   settingsActive,
@@ -118,6 +137,17 @@ export function Sidebar({
           </button>
 
           <div className="flex shrink-0 items-center gap-0.5 pr-1">
+            {item.archived ? null : (
+              <button
+                type="button"
+                onClick={() => onOpenRepoSettings(item.path)}
+                title="Repository settings"
+                aria-label={`Settings for ${item.name}`}
+                className="rounded p-1 text-zinc-500 hover:bg-zinc-700 hover:text-zinc-200"
+              >
+                <GearIcon />
+              </button>
+            )}
             {confirmRemove === item.path ? (
               <button
                 type="button"
@@ -175,23 +205,50 @@ export function Sidebar({
             {list.map((worktree) => {
               const selected = !settingsActive && effective === worktree.path;
               const label = worktree.branch ?? `detached ${worktree.head.slice(0, 8)}`;
+              // The root checkout is the base itself, so it has no merge state. Nothing shows until the list is read.
+              const pulls = branchPulls[item.path];
+              const status =
+                worktree.isMain || !worktree.branch || pulls === undefined
+                  ? null
+                  : mergeStatus(pullForBranch(pulls, worktree.branch), worktree.head);
               return (
-                <li key={worktree.path}>
+                <li key={worktree.path} className="group relative">
                   <button
                     type="button"
                     onClick={() => onSelectWorktree(item.path, worktree.path)}
                     title={worktree.path}
-                    className={`flex w-full items-center gap-2.5 rounded-md py-1.5 pl-6 pr-2 text-left text-xs ${
+                    className={`flex w-full items-center gap-2.5 rounded-md py-1.5 pl-6 text-left text-xs ${worktree.isMain ? "pr-2" : "pr-8"} ${
                       selected ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
                     }`}
                   >
                     <span
-                      className={`h-2 w-2 shrink-0 rounded-sm ${worktree.isMain ? "bg-zinc-600" : "bg-indigo-400"}`}
+                      className={`h-2 w-2 shrink-0 rounded-sm ${
+                        worktree.isMain ? "bg-zinc-600" : status?.kind === "merged" ? "bg-emerald-400" : "bg-indigo-400"
+                      }`}
                       aria-hidden
                     />
                     <span className="min-w-0 flex-1 truncate">{label}</span>
+                    {status ? (
+                      <span
+                        title={status.hint}
+                        className={`shrink-0 rounded px-1.5 py-px text-[10px] ${STATUS_TONES[status.kind]}`}
+                      >
+                        {status.label}
+                      </span>
+                    ) : null}
                     {worktree.isMain ? <span className="shrink-0 text-[10px] text-zinc-600">root</span> : null}
                   </button>
+                  {worktree.isMain ? null : (
+                    <button
+                      type="button"
+                      onClick={() => onArchiveWorkspace(item.path, worktree)}
+                      title="Archive workspace"
+                      aria-label={`Archive ${label}`}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-500 opacity-0 hover:bg-zinc-700 hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <ArchiveIcon />
+                    </button>
+                  )}
                 </li>
               );
             })}
