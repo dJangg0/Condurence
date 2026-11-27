@@ -1,6 +1,7 @@
 //! Core runtime: owns every long-lived subsystem and coordinates startup and shutdown.
 
 pub mod events;
+pub mod recovery;
 pub mod state_db;
 
 use std::path::{Path, PathBuf};
@@ -43,6 +44,16 @@ impl CoreRuntime {
     pub fn new(app: AppHandle) -> AppResult<Self> {
         let events: Arc<dyn EventSink> = Arc::new(app);
         let db = Arc::new(StateDb::open(&state_db_path()?)?);
+        // Nothing can still be running at startup, so runs the last launch left live are over.
+        let launched = now_ms();
+        db.close_interrupted_runs(launched)?;
+        // A crash skips the exit hook, and agents run in their own process groups, so the ones the
+        // last launch started may still be running. Stop them before this launch starts any of its own.
+        match recovery::recover(&db, launched, &mcp::compiler::run_dirs_root(), std::time::Duration::from_millis(1500)) {
+            Ok(report) if !report.is_empty() => eprintln!("recovered from an unclean exit: {report:?}"),
+            Ok(_) => {}
+            Err(e) => eprintln!("could not clean up after the last launch: {e}"),
+        }
         let pty = Arc::new(PtyManager::new(events.clone()));
         let locks = Arc::new(RepoLocks::default());
         let watchers = Arc::new(WorkspaceWatchers::default());
