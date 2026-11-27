@@ -11,18 +11,45 @@ type Props = {
 };
 
 /**
- * xterm.js attached to a native PTY. On mount it subscribes to live output, replays the
- * backend ring buffer (so remounting never loses context), then forwards input and resizes.
+ * A pane in a hidden tab has no layout box. Its size must not be read or sent to the process, since
+ * it would shrink the agent's terminal to nothing. It is fitted again once it is shown.
+ */
+function isShown(element: HTMLElement): boolean {
+  return element.getClientRects().length > 0;
+}
+
+/**
+ * xterm.js attached to a native PTY. On mount it subscribes to live output, replays the backend's
+ * ring buffer, then forwards input and resizes.
+ *
+ * Keep the pane mounted while another tab is shown rather than remounting it. A remount replays only
+ * the byte tail the backend holds, so it drops older output and draws the agent at the wrong size.
  */
 export function TerminalPane({ sessionId, interactive = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  // Read by the input handler, so a change does not rebuild the live terminal.
+  const interactiveRef = useRef(interactive);
   const [exitCode, setExitCode] = useState<number | null>(null);
+
+  // A run starting or ending flips `interactive`. It is applied to the live terminal, which keeps its
+  // output and scrollback.
+  useEffect(() => {
+    interactiveRef.current = interactive;
+    const term = termRef.current;
+    if (term) {
+      term.options.cursorBlink = interactive;
+      term.options.disableStdin = !interactive;
+    }
+  }, [interactive]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let disposed = false;
+    // Set when the pane mounts hidden, so the process gets its size once the pane is shown.
+    let sizeUnsent = false;
     const unlisteners: Array<() => void> = [];
     const track = (unlisten: () => void) => {
       if (disposed) unlisten();
@@ -30,14 +57,15 @@ export function TerminalPane({ sessionId, interactive = false }: Props) {
     };
 
     const term = new Terminal({
-      cursorBlink: interactive,
-      disableStdin: !interactive,
+      cursorBlink: interactiveRef.current,
+      disableStdin: !interactiveRef.current,
       convertEol: false,
       fontSize: 12,
       fontFamily: 'ui-monospace, Menlo, Monaco, "Cascadia Mono", monospace',
       scrollback: 5000,
       theme: { background: "#09090b", foreground: "#e4e4e7", cursor: "#a5b4fc", selectionBackground: "#3f3f46" },
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
@@ -67,21 +95,33 @@ export function TerminalPane({ sessionId, interactive = false }: Props) {
       for (const chunk of pending) term.write(chunk);
       pending.length = 0;
       ready = true;
-      fit.fit();
-      await ipc.resizeAgentPty(sessionId, term.cols, term.rows).catch(() => undefined);
+      // A hidden pane is fitted and sized when it is shown, by the observer below.
+      if (isShown(container)) {
+        fit.fit();
+        await ipc.resizeAgentPty(sessionId, term.cols, term.rows).catch(() => undefined);
+      } else {
+        sizeUnsent = true;
+      }
     };
 
     const onData = term.onData((data) => {
-      if (interactive) void ipc.writeAgentPty(sessionId, data).catch(() => undefined);
+      if (interactiveRef.current) void ipc.writeAgentPty(sessionId, data).catch(() => undefined);
     });
     const onResize = term.onResize(({ cols, rows }) => {
       void ipc.resizeAgentPty(sessionId, cols, rows).catch(() => undefined);
     });
     const observer = new ResizeObserver(() => {
+      if (!isShown(container)) return;
       try {
         fit.fit();
       } catch {
         // The container can be momentarily zero-sized while panels reflow.
+        return;
+      }
+      // A pane that was hidden at mount has not told its process its size yet. Later changes go through onResize.
+      if (sizeUnsent) {
+        sizeUnsent = false;
+        void ipc.resizeAgentPty(sessionId, term.cols, term.rows).catch(() => undefined);
       }
     });
     observer.observe(container);
@@ -96,9 +136,10 @@ export function TerminalPane({ sessionId, interactive = false }: Props) {
       onData.dispose();
       onResize.dispose();
       unlisteners.forEach((unlisten) => unlisten());
+      termRef.current = null;
       term.dispose();
     };
-  }, [sessionId, interactive]);
+  }, [sessionId]);
 
   return (
     <div className="relative h-full w-full bg-zinc-950 p-2">
