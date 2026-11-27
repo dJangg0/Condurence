@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use open_conductor_lib::github::{self, LinkState};
+use condurence_lib::github::{self, LinkState};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -29,7 +29,7 @@ fn make_repo(parent: &Path) -> PathBuf {
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "test@example.com"]);
-    git(&repo, &["config", "user.name", "OpenConductor Test"]);
+    git(&repo, &["config", "user.name", "Condurence Test"]);
     std::fs::write(repo.join("README.md"), "# demo\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -240,7 +240,7 @@ async fn origin_is_unverified_when_gh_is_not_installed() {
 #[tokio::test]
 async fn picked_repository_is_cloned_into_the_managed_folder() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("OpenConductor").join("repos");
+    let root = tmp.path().join("Condurence").join("repos");
     let gh = fake_gh(tmp.path(), true);
 
     let path = github::clone_repository(Some(&gh), &root, "octo/demo").await.unwrap();
@@ -335,4 +335,27 @@ async fn account_repositories_are_listed_for_the_picker() {
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].name_with_owner, "octo/demo");
     assert_eq!(repos[0].description, None);
+}
+
+#[tokio::test]
+async fn a_copy_cloned_under_the_earlier_folder_is_found_and_other_folders_are_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy = github::legacy_clone_root(tmp.path());
+    assert_eq!(legacy, tmp.path().join("OpenConductor").join("repos"));
+    assert_ne!(legacy, github::default_clone_root(tmp.path()), "new clones go to a different folder");
+
+    let demo = legacy.join("demo");
+    std::fs::create_dir_all(&demo).unwrap();
+    git(&demo, &["init", "-q", "-b", "main"]);
+    git(&demo, &["remote", "add", "origin", "https://github.com/octo/demo.git"]);
+    let other = legacy.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(&other, &["remote", "add", "origin", "https://github.com/someone-else/other.git"]);
+
+    assert_eq!(github::existing_clone(&legacy, "octo/demo").await, Some(demo));
+    assert_eq!(github::existing_clone(&legacy, "OCTO/Demo").await.is_some(), true, "owner and name ignore case");
+    assert_eq!(github::existing_clone(&legacy, "octo/other").await, None, "a folder of that name that is another repository");
+    assert_eq!(github::existing_clone(&legacy, "octo/missing").await, None);
+    assert_eq!(github::existing_clone(&legacy, "not a slug").await, None);
 }

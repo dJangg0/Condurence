@@ -21,7 +21,7 @@ type Props = {
 
 /**
  * The Open repository dialog. It lists the signed-in account's repositories as soon as it
- * opens. Picking one clones it into `~/OpenConductor/repos` and opens it; a repository already
+ * opens. Picking one clones it into `~/Condurence/repos` and opens it; a repository already
  * cloned there opens without downloading again. A local folder can still be chosen instead.
  */
 export function OpenRepositoryDialog({ onOpenPath, onChooseLocal, onClose }: Props) {
@@ -183,7 +183,7 @@ export function OpenRepositoryDialog({ onOpenPath, onChooseLocal, onClose }: Pro
                 ))}
               </ul>
               {openError ? <Notice>{openError}</Notice> : null}
-              <p className={MUTED}>Repositories are cloned into ~/OpenConductor/repos.</p>
+              <p className={MUTED}>Repositories are cloned into ~/Condurence/repos.</p>
             </>
           ) : null}
         </div>

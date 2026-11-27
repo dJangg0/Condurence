@@ -5,7 +5,7 @@ A native Agentic Development Environment built with **Tauri v2** (Rust) and **Re
 - **Workspaces:** parallel, isolated `git worktree` workspaces with live diffs and PTY terminals (xterm.js).
 - **Agent Orchestration:** a railway-style canvas (React Flow) where agent nodes are wired into routing rules (`delegates_to`, `verifies`, `escalates_to`) and executed through a local MCP router.
 
-The topology is committed to each repository as `.orchestrator/graph.json`. Runtime telemetry lives in `~/.openconductor/state.db`.
+The topology is committed to each repository as `.orchestrator/graph.json`. Runtime telemetry lives in `~/.condurence/state.db`.
 
 ## Requirements
 

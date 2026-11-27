@@ -200,9 +200,32 @@ pub async fn connect_repository(gh: Option<&Path>, repo_root: &Path, name_with_o
     repo_connection(Some(gh), repo_root).await
 }
 
-/// Folder that repositories picked from GitHub are cloned into: `~/OpenConductor/repos`.
+/// Folder that repositories picked from GitHub are cloned into: `~/Condurence/repos`.
 pub fn default_clone_root(home: &Path) -> PathBuf {
+    home.join("Condurence").join("repos")
+}
+
+/// Folder repositories were cloned into under the app's earlier name: `~/OpenConductor/repos`.
+/// Checkouts made there stay where they are, because the app remembers them by path, and picking
+/// the same repository again finds them with `existing_clone` instead of cloning it a second time.
+pub fn legacy_clone_root(home: &Path) -> PathBuf {
     home.join("OpenConductor").join("repos")
+}
+
+/// The checkout of `name_with_owner` that `root` already holds, if it holds one. A folder of that
+/// name that is another repository, or no repository, is not a match.
+pub async fn existing_clone(root: &Path, name_with_owner: &str) -> Option<PathBuf> {
+    if !is_valid_slug(name_with_owner) {
+        return None;
+    }
+    let target = root.join(name_with_owner.split('/').nth(1)?);
+    if !target.join(".git").exists() {
+        return None;
+    }
+    let origin = origin_url(&target).await.ok().flatten()?;
+    parse_github_slug(&origin)
+        .is_some_and(|slug| slug.eq_ignore_ascii_case(name_with_owner))
+        .then_some(target)
 }
 
 /// Clones `name_with_owner` into `root/<name>` with `gh repo clone` and returns that path.
@@ -510,7 +533,7 @@ mod tests {
     fn picked_repositories_clone_under_the_home_folder() {
         assert_eq!(
             default_clone_root(Path::new("/Users/me")),
-            PathBuf::from("/Users/me/OpenConductor/repos")
+            PathBuf::from("/Users/me/Condurence/repos")
         );
     }
 

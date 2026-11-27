@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use open_conductor_lib::git::{self, diff_engine, locks::RepoLocks, worktree};
+use condurence_lib::git::{self, diff_engine, locks::RepoLocks, worktree};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -24,11 +24,16 @@ fn make_repo(parent: &Path) -> PathBuf {
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "test@example.com"]);
-    git(&repo, &["config", "user.name", "OpenConductor Test"]);
+    git(&repo, &["config", "user.name", "Condurence Test"]);
     std::fs::write(repo.join("README.md"), "# demo\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     repo
+}
+
+/// Archives a workspace the way the app does for a plain local repository: no GitHub, no remote.
+async fn archive(locks: &RepoLocks, repo: &Path, branch: &str, folder: &str, delete_branch: bool) -> condurence_lib::error::AppResult<condurence_lib::workspaces::ArchiveOutcome> {
+    condurence_lib::workspaces::archive_workspace(locks, None, repo, Some(branch), folder, "origin", delete_branch, false).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -73,7 +78,7 @@ async fn workspace_lifecycle_create_diff_merge_remove() {
 
     // Removing the workspace deletes the folder. A squash merge leaves the branch unmerged
     // in git's eyes, so the safe `branch -d` keeps it; no committed work is ever dropped.
-    worktree::remove_worktree(&locks, &repo, "feature/greeting", "ws-greeting")
+    archive(&locks, &repo, "feature/greeting", "ws-greeting", true)
         .await
         .expect("remove worktree");
     assert!(!worktree_path.exists());
@@ -100,10 +105,32 @@ async fn removing_a_fully_merged_workspace_deletes_its_branch() {
         .unwrap();
     assert!(merged.merged, "merge should succeed: {}", merged.message);
 
-    worktree::remove_worktree(&locks, &repo, "feature/plain", "ws-plain")
+    archive(&locks, &repo, "feature/plain", "ws-plain", true)
         .await
         .expect("remove worktree");
     assert!(git(&repo, &["branch", "--list", "feature/plain"]).trim().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_workspace_keeps_its_branch_when_the_setting_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = make_repo(tmp.path());
+    let locks = RepoLocks::default();
+
+    let info = worktree::create_worktree(&locks, &repo, "feature/kept", "ws-kept", None)
+        .await
+        .unwrap();
+    let worktree_path = PathBuf::from(&info.path);
+    std::fs::write(worktree_path.join("kept.txt"), "x\n").unwrap();
+    git(&worktree_path, &["add", "."]);
+    git(&worktree_path, &["commit", "-q", "-m", "kept"]);
+    worktree::merge_worktree(&locks, &repo, "feature/kept", "main", false).await.unwrap();
+
+    archive(&locks, &repo, "feature/kept", "ws-kept", false)
+        .await
+        .expect("remove worktree");
+    assert!(!worktree_path.exists());
+    assert!(!git(&repo, &["branch", "--list", "feature/kept"]).trim().is_empty(), "the branch stays");
 }
 
 #[tokio::test(flavor = "multi_thread")]

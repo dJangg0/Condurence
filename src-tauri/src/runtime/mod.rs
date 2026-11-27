@@ -123,7 +123,71 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Condurence's folder in the home directory, `~/.condurence`: the state database and the global
+/// skills. A folder left by the app's earlier name, `~/.openconductor`, is moved over the first
+/// time, so the run history, the repository list and the skills carry on.
+pub fn data_dir() -> Option<PathBuf> {
+    home_dir().map(|home| migrate_data_dir(&home))
+}
+
+/// The data folder under `home`. When only the earlier folder exists it is renamed, which is atomic
+/// on one volume and takes the database's WAL files with it. If it cannot be moved, that folder
+/// keeps being used, so nothing is left behind and the app does not start with an empty history.
+pub fn migrate_data_dir(home: &Path) -> PathBuf {
+    let current = home.join(".condurence");
+    let earlier = home.join(".openconductor");
+    if !current.exists() && earlier.is_dir() && std::fs::rename(&earlier, &current).is_err() {
+        return earlier;
+    }
+    current
+}
+
 fn state_db_path() -> AppResult<PathBuf> {
-    let home = home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
-    Ok(home.join(".openconductor").join("state.db"))
+    let dir = data_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    Ok(dir.join("state.db"))
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_earlier_folder_is_moved_over_with_everything_in_it() {
+        let home = tempfile::tempdir().unwrap();
+        let earlier = home.path().join(".openconductor");
+        std::fs::create_dir_all(earlier.join("skills")).unwrap();
+        std::fs::write(earlier.join("state.db"), "runs").unwrap();
+        std::fs::write(earlier.join("state.db-wal"), "pending writes").unwrap();
+        std::fs::write(earlier.join("skills").join("planner.md"), "plan").unwrap();
+
+        let dir = migrate_data_dir(home.path());
+
+        assert_eq!(dir, home.path().join(".condurence"));
+        assert!(!earlier.exists(), "the earlier folder is gone, not copied");
+        assert_eq!(std::fs::read_to_string(dir.join("state.db")).unwrap(), "runs");
+        assert_eq!(std::fs::read_to_string(dir.join("state.db-wal")).unwrap(), "pending writes");
+        assert_eq!(std::fs::read_to_string(dir.join("skills").join("planner.md")).unwrap(), "plan");
+    }
+
+    #[test]
+    fn a_folder_that_already_exists_is_never_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".condurence")).unwrap();
+        std::fs::write(home.path().join(".condurence").join("state.db"), "new").unwrap();
+        std::fs::create_dir_all(home.path().join(".openconductor")).unwrap();
+        std::fs::write(home.path().join(".openconductor").join("state.db"), "old").unwrap();
+
+        let dir = migrate_data_dir(home.path());
+
+        assert_eq!(std::fs::read_to_string(dir.join("state.db")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(home.path().join(".openconductor").join("state.db")).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_fresh_home_gets_the_new_path_and_nothing_is_created_for_it() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = migrate_data_dir(home.path());
+        assert_eq!(dir, home.path().join(".condurence"));
+        assert!(!dir.exists() && !home.path().join(".openconductor").exists());
+    }
 }

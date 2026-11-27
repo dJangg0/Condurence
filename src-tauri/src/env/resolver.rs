@@ -58,16 +58,21 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
     which::which(name).ok()
 }
 
-/// Resolves a provider CLI. `OPENCONDUCTOR_<NAME>_BIN` (e.g. `OPENCONDUCTOR_CLAUDE_BIN`)
-/// pins an explicit executable, for custom installs and for tests. The result is the installed
-/// executable itself, with symlinks followed (see `installed_executable`).
+/// Prefixes of the variable that pins a provider CLI. `CONDURENCE` is current. `OPENCONDUCTOR` is
+/// the app's earlier name and is still honoured, so a setup made before the rename keeps working.
+const PIN_PREFIXES: [&str; 2] = ["CONDURENCE", "OPENCONDUCTOR"];
+
+/// Resolves a provider CLI. `CONDURENCE_<NAME>_BIN` (e.g. `CONDURENCE_CLAUDE_BIN`) pins an explicit
+/// executable, for custom installs and for tests. The result is the installed executable itself,
+/// with symlinks followed (see `installed_executable`).
 pub fn resolve_provider(name: &str) -> Option<PathBuf> {
-    let var = format!("OPENCONDUCTOR_{}_BIN", name.to_ascii_uppercase());
-    let found = match std::env::var_os(&var).map(PathBuf::from) {
-        Some(path) if path.is_file() => Some(path),
-        _ => resolve_binary(name),
-    };
-    found.map(|path| installed_executable(&path))
+    let upper = name.to_ascii_uppercase();
+    let pinned = PIN_PREFIXES.iter().find_map(|prefix| {
+        std::env::var_os(format!("{prefix}_{upper}_BIN"))
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+    });
+    pinned.or_else(|| resolve_binary(name)).map(|path| installed_executable(&path))
 }
 
 /// Follows symlinks to the real executable. Codex looks for its helper, `codex-code-mode-host`,
@@ -177,6 +182,32 @@ fn is_env_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_is_pinned_by_the_current_variable_and_by_the_earlier_one() {
+        // Each name is used by this test alone, so the process-wide environment cannot race.
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::canonicalize(path).unwrap()
+        };
+        let (current, earlier, newer) = (file("current"), file("earlier"), file("newer"));
+
+        std::env::set_var("CONDURENCE_ZZPIN1_BIN", &current);
+        assert_eq!(resolve_provider("zzpin1"), Some(current.clone()));
+
+        std::env::set_var("OPENCONDUCTOR_ZZPIN2_BIN", &earlier);
+        assert_eq!(resolve_provider("zzpin2"), Some(earlier.clone()), "the earlier name still works");
+
+        std::env::set_var("OPENCONDUCTOR_ZZPIN3_BIN", &earlier);
+        std::env::set_var("CONDURENCE_ZZPIN3_BIN", &newer);
+        assert_eq!(resolve_provider("zzpin3"), Some(newer), "the current name wins when both are set");
+
+        // A pin that is not a file is ignored, and nothing else provides a CLI of that name.
+        std::env::set_var("CONDURENCE_ZZPIN4_BIN", dir.path().join("missing"));
+        assert_eq!(resolve_provider("zzpin4"), None);
+    }
 
     #[test]
     fn parses_env_block_between_markers() {
