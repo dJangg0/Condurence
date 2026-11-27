@@ -1,6 +1,6 @@
 import type { FileDiff, FileStatus } from "../types/orchestration";
 
-const STATUS_BADGE: Record<FileStatus, { label: string; className: string }> = {
+export const STATUS_BADGE: Record<FileStatus, { label: string; className: string }> = {
   added: { label: "A", className: "text-emerald-300 bg-emerald-500/15" },
   untracked: { label: "U", className: "text-emerald-300 bg-emerald-500/15" },
   modified: { label: "M", className: "text-amber-300 bg-amber-500/15" },
