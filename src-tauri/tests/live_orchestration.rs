@@ -19,14 +19,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use open_conductor_lib::git::locks::RepoLocks;
-use open_conductor_lib::graph::{
+use condurence_lib::git::locks::RepoLocks;
+use condurence_lib::graph::{
     default_graph, AgentProvider, GraphEdge, GraphNode, OrchestrationGraph, RelationType, RoutingEdgeData, WorktreeMode,
 };
-use open_conductor_lib::mcp::router::strip_ansi;
-use open_conductor_lib::mcp::{router::Router, server};
-use open_conductor_lib::pty::PtyManager;
-use open_conductor_lib::runtime::{events::EventSink, state_db::StateDb};
+use condurence_lib::mcp::router::strip_ansi;
+use condurence_lib::mcp::{router::Router, server};
+use condurence_lib::pty::PtyManager;
+use condurence_lib::runtime::{events::EventSink, state_db::StateDb};
 use serde_json::Value;
 
 const HAIKU: &str = "claude-haiku-5-5";
@@ -90,7 +90,7 @@ fn make_repo(parent: &Path) -> PathBuf {
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "test@example.com"]);
-    git(&repo, &["config", "user.name", "OpenConductor Live Test"]);
+    git(&repo, &["config", "user.name", "Condurence Live Test"]);
     std::fs::write(repo.join("README.md"), "# live demo\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -143,7 +143,7 @@ fn graph(child_provider: AgentProvider) -> OrchestrationGraph {
         target: "greeter".into(),
         data: RoutingEdgeData { relation_type: RelationType::DelegatesTo, max_retries: 1, requires_approval: false },
     }];
-    open_conductor_lib::graph::validate(&graph).expect("live graph must validate");
+    condurence_lib::graph::validate(&graph).expect("live graph must validate");
     graph
 }
 
@@ -301,18 +301,17 @@ async fn live_claude_orchestrator_delegates_hello_to_claude_greeter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spends real Claude and Codex usage; run with --ignored"]
-async fn live_codex_child_failure_is_reported_not_swallowed() {
+async fn live_codex_child_reply_comes_back_as_its_summary() {
     let report = run_live(AgentProvider::Codex).await;
-    print_report("claude -> codex (expected to fail while the ChatGPT workspace is deactivated)", &report);
+    print_report("claude -> codex", &report);
 
     assert!(!report.timed_out, "the run timed out: see the printed terminals above");
     assert!(report.greeter_statuses.iter().any(|s| s == "running"), "the codex greeter never started");
-    assert_eq!(report.greeter_statuses.last().map(String::as_str), Some("error"), "a failed child must end in error");
-    // The canvas card must show why it failed, not the prompt the CLI echoed at the top.
+    assert_eq!(report.greeter_statuses.last().map(String::as_str), Some("idle"), "a child that answered must end idle");
+    // Codex may not call `report_task_result`, so the card comes from its final reply. That is the
+    // greeting itself, not the token counter Codex prints after it or the prompt it echoed first.
     let card = report.greeter_summary.clone().unwrap_or_default().to_lowercase();
-    assert!(
-        card.contains("402") || card.contains("payment") || card.contains("error"),
-        "the error card does not explain the failure: {card:?}"
-    );
+    assert!(card.contains("hello") || card.contains("hi"), "the card is not the greeting: {card:?}");
     assert!(!card.contains("## completion"), "the card shows the echoed prompt: {card:?}");
+    assert!(!card.chars().all(|c| c.is_ascii_digit() || c == ','), "the card is the token counter: {card:?}");
 }

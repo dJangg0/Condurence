@@ -1,14 +1,8 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { PROVIDER_LABELS, type AgentProvider, type NodeStatus } from "../types/orchestration";
+import { PROVIDER_LABELS, type NodeStatus } from "../types/orchestration";
 import type { AgentFlowNode } from "../lib/graph";
-
-/** Provider colour shared by node rails and usage meters. */
-export const PROVIDER_ACCENT: Record<AgentProvider, string> = {
-  claude: "bg-orange-400",
-  codex: "bg-emerald-400",
-  gemini: "bg-sky-400",
-  opencode: "bg-violet-400",
-};
+import { ProviderIcon } from "./ProviderIcon";
+import { PROVIDER_ACCENT } from "./providerLogos";
 
 const STATUS: Record<NodeStatus, { dot: string; label: string }> = {
   idle: { dot: "bg-zinc-500", label: "Idle" },
@@ -46,7 +40,11 @@ export function AgentNode({ data, selected }: NodeProps<AgentFlowNode>) {
           </div>
           <div className="mt-0.5 truncate text-xs text-zinc-400">{data.role || "No role mandate"}</div>
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide">
-            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300" title={PROVIDER_LABELS[data.provider]}>
+            <span
+              className="inline-flex items-center gap-1.5 rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300"
+              title={PROVIDER_LABELS[data.provider]}
+            >
+              <ProviderIcon provider={data.provider} size="sm" />
               {data.provider}
               {data.model ? ` · ${data.model}` : ""}{data.effort ? ` · ${data.effort}` : ""}
             </span>

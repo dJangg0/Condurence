@@ -64,6 +64,9 @@ pub struct AgentNodeData {
     pub system_prompt: String,
     #[serde(default)]
     pub worktree_mode: WorktreeMode,
+    /// `read-only` for reviewers and planners, which may read and report but not edit.
+    #[serde(default)]
+    pub access: AccessLevel,
     /// Runtime-only. Persisted as `idle` so topology diffs stay clean.
     #[serde(default)]
     pub status: NodeStatus,
@@ -120,6 +123,16 @@ pub enum WorktreeMode {
     Isolated,
 }
 
+/// What a node may change. A `read-only` node is launched in its provider's read-only mode where
+/// the CLI has one, and the runtime checks that its worktree was left as it was found.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessLevel {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
@@ -171,6 +184,7 @@ pub fn default_graph() -> OrchestrationGraph {
                     context_paths: vec!["AGENTS.md".into(), "docs/".into()],
                     system_prompt: "Decompose user goals into scoped tasks and delegate via MCP tools.".into(),
                     worktree_mode: WorktreeMode::Shared,
+                    access: AccessLevel::ReadWrite,
                     status: NodeStatus::Idle,
                 },
             },
@@ -188,6 +202,7 @@ pub fn default_graph() -> OrchestrationGraph {
                     context_paths: vec!["src/".into()],
                     system_prompt: "Implement the delegated task. Keep changes small and commit when done.".into(),
                     worktree_mode: WorktreeMode::Isolated,
+                    access: AccessLevel::ReadWrite,
                     status: NodeStatus::Idle,
                 },
             },
@@ -203,8 +218,9 @@ pub fn default_graph() -> OrchestrationGraph {
                     effort: String::new(),
                     skills: vec![],
                     context_paths: vec!["tests/".into()],
-                    system_prompt: "Run the verification command, reproduce failures and report evidence.".into(),
+                    system_prompt: "Review the delegated changes against their acceptance criteria and the gate output. Isolate each failure and report it with evidence. You cannot edit files: send the fix back to the developer.".into(),
                     worktree_mode: WorktreeMode::Shared,
+                    access: AccessLevel::ReadOnly,
                     status: NodeStatus::Idle,
                 },
             },

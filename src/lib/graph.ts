@@ -25,6 +25,7 @@ export function defaultAgentData(name = "New agent"): AgentNodeData {
     contextPaths: [],
     systemPrompt: "",
     worktreeMode: "isolated",
+    access: "read-write",
     status: "idle",
   };
 }
