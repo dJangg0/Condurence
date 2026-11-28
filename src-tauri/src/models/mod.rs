@@ -48,11 +48,10 @@ pub fn opencode_fallback_models() -> Vec<ModelOption> {
         .collect()
 }
 
+/// The Antigravity CLI's default model, the only slug Google's docs state. `agy models` lists the
+/// rest for the signed-in account, and the dropdown's Custom entry takes any other.
 pub fn gemini_models() -> Vec<ModelOption> {
-    vec![
-        option("gemini-2.5-pro", "Gemini 2.5 Pro", None),
-        option("gemini-2.5-flash", "Gemini 2.5 Flash", Some("faster")),
-    ]
+    vec![option("gemini-4-neon", "Gemini 4 Neon", Some("default"))]
 }
 
 /// Models from Codex's `models_cache.json`: the ones its own picker lists, in its own order.

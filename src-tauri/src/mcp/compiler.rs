@@ -482,9 +482,11 @@ pub fn invocation_with_access(
             })
         }
         AgentProvider::Gemini => {
-            // GEMINI_CLI_HOME relocates the whole Gemini home, including the OAuth account and
-            // trust files. The ephemeral home links the user's real entries and only carries its
-            // own settings.json, so the user's sign-in keeps working inside the child.
+            // This provider runs Google's Antigravity CLI (`agy`), which replaced the Gemini CLI
+            // after Google retired its Sign in with Google for it. `agy` has no documented
+            // GEMINI_CLI_HOME equivalent and reads MCP servers from mcp_config.json, not
+            // settings.json, so the home written below does not reach it: delegated Gemini runs
+            // currently start without the bridge.
             let home = run_dir.join(format!("{stem}-home"));
             let user_gemini = crate::runtime::home_dir().map(|dir| dir.join(".gemini"));
             prepare_gemini_home(&home.join(".gemini"), user_gemini.as_deref(), &server)?;
@@ -497,13 +499,11 @@ pub fn invocation_with_access(
                     }
                 }
                 Mode::Headless => {
-                    args.extend(["-p".into(), full, "--approval-mode".into(), "auto_edit".into()]);
+                    args.extend(["-p".into(), full, "--mode".into(), "accept-edits".into()]);
                 }
             }
-            // Gemini hides every MCP server in untrusted folders, and a fresh worktree is one.
-            // The user chose this workspace through the topology, so trust it for the session.
-            args.push("--skip-trust".into());
-            push_model(&mut args, model, "-m");
+            // agy has no trust flag: workspace trust is asked once, on first launch.
+            push_model(&mut args, model, "--model");
             Ok(Invocation {
                 program: provider.binary().into(),
                 args,
@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_runs_trust_the_worktree_so_mcp_servers_load() {
+    fn gemini_runs_use_the_antigravity_cli_flags() {
         let dir = tempfile::tempdir().unwrap();
         let exe = PathBuf::from("/bin/condurence");
         let bridge = BridgeAddress {
@@ -801,10 +801,16 @@ mod tests {
             instance_id: "senior-dev.1",
             token: "t",
         };
-        for mode in [Mode::Headless, Mode::Interactive] {
-            let inv = invocation(AgentProvider::Gemini, mode, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
-            assert!(inv.args.contains(&"--skip-trust".to_string()), "{mode:?} must pass --skip-trust");
-        }
+        let headless = invocation(AgentProvider::Gemini, Mode::Headless, "gemini-x", "", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert_eq!(headless.program, "agy");
+        assert_eq!(headless.args[0], "-p");
+        assert!(headless.args.windows(2).any(|pair| pair == ["--mode", "accept-edits"]), "headless runs auto-accept edits");
+        assert!(headless.args.windows(2).any(|pair| pair == ["--model", "gemini-x"]));
+        assert!(!headless.args.contains(&"--skip-trust".to_string()), "agy has no --skip-trust");
+
+        let interactive = invocation(AgentProvider::Gemini, Mode::Interactive, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert_eq!(interactive.args[0], "-i");
+        assert!(!interactive.args.contains(&"--mode".to_string()));
     }
 
     #[cfg(unix)]
