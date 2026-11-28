@@ -108,7 +108,7 @@ impl AgentProvider {
             AgentProvider::Claude => "claude",
             AgentProvider::Codex => "codex",
             AgentProvider::Opencode => "opencode",
-            AgentProvider::Gemini => "gemini",
+            AgentProvider::Gemini => "agy",
         }
     }
 }

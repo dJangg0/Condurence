@@ -224,9 +224,52 @@ pub fn instructions(graph: &OrchestrationGraph, node: &GraphNode, repo_root: &Pa
         out.push_str("When your task is finished or blocked, call `report_task_result` exactly once with a status and a concise summary. Also list the files you changed and the checks you ran with their exit codes. The repository's gates check your work after you report, and a 'completed' report only stands if they pass. Do not end without calling it.\n");
     } else {
         out.push_str("## Orchestration\n");
-        out.push_str("You are the root orchestrator. Decompose the user's goal into scoped tasks, delegate them with the tools above, and summarize results for the user.\n");
+        if has_delegate_routes(graph, &node.id) {
+            out.push_str(ROOT_DELEGATION_RULES);
+            // Only a root that really starts in plan mode is told so; other providers have no such mode.
+            if starts_in_plan_mode(graph, node) {
+                out.push_str(ROOT_PLAN_MODE_RULE);
+            } else {
+                out.push_str(ROOT_PLAN_FIRST_RULE);
+            }
+            out.push_str(ROOT_DELEGATION_TAIL);
+        } else {
+            out.push_str("You are the root orchestrator. Decompose the user's goal into scoped tasks and summarize results for the user.\n");
+        }
     }
     out
+}
+
+/// The root's mandate when it has a team to delegate to: the root coordinates and the team does
+/// the work. These are rules, not advice, because a root that can run commands and edit files
+/// will otherwise do small jobs itself, which skips the team and its verification.
+const ROOT_DELEGATION_RULES: &str = "You are the root orchestrator. Your team is the agents in the Topology above, and they do the work. You coordinate them.\n\
+- Any goal that changes something is delegated: code, configuration, dependencies, installs, global tools, or anything outside this repository. Use the delegate_to_* tools for that work, and do not run those commands or edit those files yourself, even when the task looks small.\n\
+- Investigations that need commands or a search of the repository are delegated too. Answer the user yourself only from files you can read or from results the team has reported.\n\
+";
+
+const ROOT_PLAN_MODE_RULE: &str = "- You start in plan mode. Read what you need, then propose a plan: which team member takes each task, and in what order. Once the user approves it, record a multi-step plan with plan_tasks, then delegate each task by its id.\n";
+
+/// For a root whose provider has no plan mode: the same plan-then-approve flow, asked for in words.
+const ROOT_PLAN_FIRST_RULE: &str = "- Before you delegate, read what you need, then propose a plan: which team member takes each task, and in what order. Once the user approves it, record a multi-step plan with plan_tasks, then delegate each task by its id.\n";
+
+const ROOT_DELEGATION_TAIL: &str = "- If no team member fits a task, tell the user what is missing and ask how to proceed. Do not do the work yourself.\n\
+- Summarize each delegated result for the user: what changed, and whether its checks passed.\n";
+
+/// Whether this node has a `delegates_to` route, so there is a team to hand work to.
+fn has_delegate_routes(graph: &OrchestrationGraph, node_id: &str) -> bool {
+    graph
+        .edges
+        .iter()
+        .any(|edge| edge.source == node_id && edge.data.relation_type == RelationType::DelegatesTo)
+}
+
+/// The CEO starts in plan mode: a Claude root with a team to delegate to. It proposes its plan and
+/// waits for the user's approval before it acts, so delegation waits on that approval too. A root
+/// with no team is a single agent and starts as it always did. Other providers have no verified
+/// plan mode here, so they are asked for the same flow in their instructions instead.
+pub fn starts_in_plan_mode(graph: &OrchestrationGraph, node: &GraphNode) -> bool {
+    node.data.provider == AgentProvider::Claude && has_delegate_routes(graph, &node.id)
 }
 
 /// Every agent in the run and every route between them, so each agent knows the whole team it
@@ -357,7 +400,7 @@ pub fn invocation(
     bridge: &BridgeAddress,
     run_dir: &Path,
 ) -> AppResult<Invocation> {
-    invocation_with_access(provider, mode, model, effort, system, prompt, bridge, run_dir, AccessLevel::ReadWrite)
+    invocation_with_access(provider, mode, model, effort, system, prompt, bridge, run_dir, AccessLevel::ReadWrite, false)
 }
 
 /// Edit and shell tools a read-only Claude session is not allowed to use. Shell is included,
@@ -366,7 +409,8 @@ const CLAUDE_READ_ONLY_DENIED: &str = "--disallowedTools=Bash,Edit,Write,Noteboo
 
 /// [`invocation`] for a node with the given access. A read-only node gets the provider's read-only
 /// mode where the CLI has one. Gemini and OpenCode have none that is verified here, so for them
-/// the runtime's worktree check is the only enforcement.
+/// the runtime's worktree check is the only enforcement. `plan` starts an interactive Claude session
+/// in its plan mode; the other providers have no verified equivalent and ignore it.
 #[allow(clippy::too_many_arguments)]
 pub fn invocation_with_access(
     provider: AgentProvider,
@@ -378,6 +422,7 @@ pub fn invocation_with_access(
     bridge: &BridgeAddress,
     run_dir: &Path,
     access: AccessLevel,
+    plan: bool,
 ) -> AppResult<Invocation> {
     let read_only = access == AccessLevel::ReadOnly;
     std::fs::create_dir_all(run_dir)?;
@@ -396,6 +441,10 @@ pub fn invocation_with_access(
                 Mode::Interactive => {
                     if !prompt.is_empty() {
                         args.push(prompt.to_string());
+                    }
+                    // Plan mode: the session reads and proposes, and asks before it edits or runs anything.
+                    if plan {
+                        args.extend(["--permission-mode".into(), "plan".into()]);
                     }
                 }
                 Mode::Headless => {
@@ -482,9 +531,11 @@ pub fn invocation_with_access(
             })
         }
         AgentProvider::Gemini => {
-            // GEMINI_CLI_HOME relocates the whole Gemini home, including the OAuth account and
-            // trust files. The ephemeral home links the user's real entries and only carries its
-            // own settings.json, so the user's sign-in keeps working inside the child.
+            // This provider runs Google's Antigravity CLI (`agy`), which replaced the Gemini CLI
+            // after Google retired its Sign in with Google for it. `agy` has no documented
+            // GEMINI_CLI_HOME equivalent and reads MCP servers from mcp_config.json, not
+            // settings.json, so the home written below does not reach it: delegated Gemini runs
+            // currently start without the bridge.
             let home = run_dir.join(format!("{stem}-home"));
             let user_gemini = crate::runtime::home_dir().map(|dir| dir.join(".gemini"));
             prepare_gemini_home(&home.join(".gemini"), user_gemini.as_deref(), &server)?;
@@ -497,13 +548,11 @@ pub fn invocation_with_access(
                     }
                 }
                 Mode::Headless => {
-                    args.extend(["-p".into(), full, "--approval-mode".into(), "auto_edit".into()]);
+                    args.extend(["-p".into(), full, "--mode".into(), "accept-edits".into()]);
                 }
             }
-            // Gemini hides every MCP server in untrusted folders, and a fresh worktree is one.
-            // The user chose this workspace through the topology, so trust it for the session.
-            args.push("--skip-trust".into());
-            push_model(&mut args, model, "-m");
+            // agy has no trust flag: workspace trust is asked once, on first launch.
+            push_model(&mut args, model, "--model");
             Ok(Invocation {
                 program: provider.binary().into(),
                 args,
@@ -631,6 +680,82 @@ fn toml_string(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::graph::default_graph;
+
+    #[test]
+    fn a_root_with_a_team_is_told_to_delegate_rather_than_do_the_work() {
+        let graph = default_graph();
+        let ceo = graph.nodes.iter().find(|n| n.id == "ceo").unwrap();
+        let text = instructions(&graph, ceo, Path::new("/repo"), false);
+        assert!(text.contains("Any goal that changes something is delegated"), "{text}");
+        assert!(text.contains("do not run those commands or edit those files yourself"), "{text}");
+        // The case that went wrong: a global install is outside the repo, but still goes to the team.
+        assert!(text.contains("installs, global tools, or anything outside this repository"), "{text}");
+        assert!(text.contains("You start in plan mode"), "{text}");
+        assert!(!text.contains("Decompose the user's goal into scoped tasks and summarize"), "{text}");
+    }
+
+    #[test]
+    fn a_non_claude_root_is_not_told_it_starts_in_plan_mode() {
+        let mut graph = default_graph();
+        let ceo = graph.nodes.iter_mut().find(|n| n.id == "ceo").unwrap();
+        ceo.data.provider = AgentProvider::Codex;
+        let ceo = graph.nodes.iter().find(|n| n.id == "ceo").unwrap();
+        assert!(!starts_in_plan_mode(&graph, ceo));
+        let text = instructions(&graph, ceo, Path::new("/repo"), false);
+        assert!(!text.contains("You start in plan mode"), "{text}");
+        assert!(text.contains("propose a plan"), "{text}");
+        assert!(text.contains("Summarize each delegated result"), "{text}");
+    }
+
+    #[test]
+    fn a_root_without_a_team_is_not_told_to_delegate() {
+        let mut graph = default_graph();
+        graph.edges.clear();
+        let ceo = graph.nodes.iter().find(|n| n.id == "ceo").unwrap();
+        let text = instructions(&graph, ceo, Path::new("/repo"), false);
+        assert!(!text.contains("Any goal that changes something is delegated"), "{text}");
+        assert!(text.contains("You are the root orchestrator."), "{text}");
+    }
+
+    #[test]
+    fn the_ceo_starts_in_claude_plan_mode_and_a_lone_root_or_a_child_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/bin/condurence");
+        let bridge = bridge_for(&exe);
+        let plan_flag = |args: &[String]| args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "plan");
+
+        let graph = default_graph();
+        let ceo = graph.nodes.iter().find(|n| n.id == "ceo").unwrap();
+        assert!(starts_in_plan_mode(&graph, ceo));
+        let planned = invocation_with_access(
+            AgentProvider::Claude,
+            Mode::Interactive,
+            "",
+            "",
+            "SYS",
+            "goal",
+            &bridge,
+            dir.path(),
+            AccessLevel::ReadWrite,
+            starts_in_plan_mode(&graph, ceo),
+        )
+        .unwrap();
+        assert!(plan_flag(&planned.args), "{:?}", planned.args);
+        // The goal stays the session's first positional argument, as every interactive launch has it.
+        assert_eq!(planned.args[0], "goal", "{:?}", planned.args);
+
+        let senior = graph.nodes.iter().find(|n| n.id == "senior-dev").unwrap();
+        assert!(!starts_in_plan_mode(&graph, senior));
+        let child = invocation(AgentProvider::Claude, Mode::Headless, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert!(!plan_flag(&child.args), "{:?}", child.args);
+
+        let mut alone = default_graph();
+        alone.edges.clear();
+        let lone_root = alone.nodes.iter().find(|n| n.id == "ceo").unwrap();
+        assert!(!starts_in_plan_mode(&alone, lone_root));
+        let plain = invocation(AgentProvider::Claude, Mode::Interactive, "", "", "SYS", "goal", &bridge, dir.path()).unwrap();
+        assert!(!plan_flag(&plain.args), "{:?}", plain.args);
+    }
 
     #[test]
     fn every_agent_is_told_the_whole_team_and_its_place_in_it() {
@@ -791,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_runs_trust_the_worktree_so_mcp_servers_load() {
+    fn gemini_runs_use_the_antigravity_cli_flags() {
         let dir = tempfile::tempdir().unwrap();
         let exe = PathBuf::from("/bin/condurence");
         let bridge = BridgeAddress {
@@ -801,10 +926,16 @@ mod tests {
             instance_id: "senior-dev.1",
             token: "t",
         };
-        for mode in [Mode::Headless, Mode::Interactive] {
-            let inv = invocation(AgentProvider::Gemini, mode, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
-            assert!(inv.args.contains(&"--skip-trust".to_string()), "{mode:?} must pass --skip-trust");
-        }
+        let headless = invocation(AgentProvider::Gemini, Mode::Headless, "gemini-x", "", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert_eq!(headless.program, "agy");
+        assert_eq!(headless.args[0], "-p");
+        assert!(headless.args.windows(2).any(|pair| pair == ["--mode", "accept-edits"]), "headless runs auto-accept edits");
+        assert!(headless.args.windows(2).any(|pair| pair == ["--model", "gemini-x"]));
+        assert!(!headless.args.contains(&"--skip-trust".to_string()), "agy has no --skip-trust");
+
+        let interactive = invocation(AgentProvider::Gemini, Mode::Interactive, "", "", "SYS", "do it", &bridge, dir.path()).unwrap();
+        assert_eq!(interactive.args[0], "-i");
+        assert!(!interactive.args.contains(&"--mode".to_string()));
     }
 
     #[cfg(unix)]
@@ -868,6 +999,7 @@ mod tests {
             &bridge,
             dir.path(),
             AccessLevel::ReadOnly,
+            false,
         )
         .unwrap();
         assert!(read_only.args.contains(&CLAUDE_READ_ONLY_DENIED.to_string()));
@@ -897,6 +1029,7 @@ mod tests {
             &bridge,
             dir.path(),
             AccessLevel::ReadOnly,
+            false,
         )
         .unwrap();
         assert_eq!(sandbox_of(&headless.args), "read-only");
@@ -911,6 +1044,7 @@ mod tests {
             &bridge,
             dir.path(),
             AccessLevel::ReadOnly,
+            false,
         )
         .unwrap();
         assert_eq!(sandbox_of(&interactive.args), "read-only");

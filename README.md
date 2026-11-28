@@ -21,7 +21,7 @@ The topology is committed to each repository as `.orchestrator/graph.json`. Runt
    ```bash
    npm install -g @anthropic-ai/claude-code   # claude
    npm install -g @openai/codex               # codex
-   npm install -g @google/gemini-cli          # gemini
+   brew install --cask antigravity-cli        # agy (Gemini models)
    npm install -g opencode-ai                 # opencode
    ```
 
@@ -46,7 +46,7 @@ The topology is committed to each repository as `.orchestrator/graph.json`. Runt
 - Rust stable (`rustup`)
 - git
 - macOS: Xcode Command Line Tools. Windows is not yet verified (see Status).
-- Provider CLIs for the agents you use (`claude`, `codex`, `gemini`, `opencode`) on your `PATH`. Condurence wraps the CLIs you are already signed into; it does not call model APIs directly.
+- Provider CLIs for the agents you use (`claude`, `codex`, `agy`, `opencode`) on your `PATH`. The Gemini provider runs Google's Antigravity CLI (`agy`), which replaced the Gemini CLI. Condurence wraps the CLIs you are already signed into; it does not call model APIs directly.
 - Optional: GitHub CLI (`gh`) for the GitHub connection in the header. Sign in from the app, or run `gh auth login` yourself. Condurence reads sign-in state through `gh` and never sees your token.
 
 ## Run
@@ -129,7 +129,7 @@ cd src-tauri && cargo test --test orchestration_e2e live_eval -- --ignored --noc
 
 ## Troubleshooting
 
-- **"'claude' was not found on your PATH":** Condurence imports your login shell's `PATH` at startup. Check that the CLI runs in a new terminal, then restart the app. To pin a binary instead, set `OPENCONDUCTOR_<PROVIDER>_BIN`, for example `OPENCONDUCTOR_CLAUDE_BIN=/path/to/claude npm run tauri dev`. The providers are `CLAUDE`, `CODEX`, `GEMINI` and `OPENCODE`. The GitHub CLI pins the same way, with `OPENCONDUCTOR_GH_BIN`.
+- **"'claude' was not found on your PATH":** Condurence imports your login shell's `PATH` at startup. Check that the CLI runs in a new terminal, then restart the app. To pin a binary instead, set `OPENCONDUCTOR_<PROVIDER>_BIN`, for example `OPENCONDUCTOR_CLAUDE_BIN=/path/to/claude npm run tauri dev`. The providers are `CLAUDE`, `CODEX`, `AGY` (the Gemini provider) and `OPENCODE`. The GitHub CLI pins the same way, with `OPENCONDUCTOR_GH_BIN`.
 - **Rust build fails on macOS:** run `xcode-select --install`, then open a new terminal.
 - **Port 1420 is in use:** another dev server is running. Stop it, because Vite is set to `strictPort`.
 - **Workspace creation fails in a new repository:** make at least one commit first.
@@ -156,7 +156,7 @@ Each delegated handoff runs headless in a visible PTY with an injected `report_t
 
 - **Provider adapters:** flags for Claude, Codex, Gemini and OpenCode were checked against each CLI's `--help` output and, for the environment variables, against the CLI sources. No live run against an authenticated subscription has been done yet.
 - **Permissions in delegated runs:** headless Claude uses `--permission-mode acceptEdits`, so shell commands such as test runs may be denied. Headless OpenCode uses `--auto`, which auto-approves every permission request. Worktree isolation limits the blast radius, but this is a real trust decision.
-- **Gemini sign-in:** `GEMINI_CLI_HOME` relocates the whole Gemini home. The ephemeral home therefore symlinks your real `~/.gemini` entries and only writes its own `settings.json`. On Windows symlinks need extra privileges, so delegated Gemini runs there start signed out.
+- **Gemini sign-in:** Google ended "Sign in with Google" for the Gemini CLI on June 18, 2026, so the Gemini provider now runs `agy`. Sign in by running `agy` once from a terminal. Delegated Gemini runs currently start without Condurence's MCP bridge: `agy` has no documented `GEMINI_CLI_HOME` equivalent and reads MCP servers from `mcp_config.json`, which has no per-run override yet.
 - **Windows:** type-checked for `x86_64-pc-windows-msvc` but not run. Process-tree teardown uses `taskkill /T` rather than Job Objects, and `.cmd` shims are launched through `cmd.exe`.
 - **Escalation:** the root orchestrator is interactive, so `escalates_to` into the root starts a fresh headless instance of the root's provider with the escalation context.
 - **Merging:** squash-merged branches are not ancestors of their target, so `git branch -d` keeps them. Removing a workspace therefore never discards unmerged work.

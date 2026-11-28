@@ -47,7 +47,7 @@ describe("UsageMeter", () => {
     const markup = renderToStaticMarkup(
       <UsageMeter live rows={[row({ provider: "gemini", measured: false, sessions: 0 })]} />,
     );
-    expect(markup).toContain("Gemini CLI");
+    expect(markup).toContain("Antigravity CLI");
     expect(markup).toContain("Not measured yet");
     expect(markup).not.toContain("tokens</span>");
   });

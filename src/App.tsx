@@ -14,6 +14,7 @@ import { SettingsView } from "./components/SettingsView";
 import { Sidebar, type ViewMode } from "./components/Sidebar";
 import { SplashScreen } from "./components/SplashScreen";
 import { WorkspaceView, type Session } from "./components/WorkspaceView";
+import { disposeTerminal } from "./lib/terminalStore";
 import type { RepoMetadata, RepoRecord, WorktreeInfo } from "./types/orchestration";
 import type { BranchPull } from "./types/pulls";
 
@@ -202,7 +203,10 @@ export default function App() {
   const endSessions = (ids: string[]) => {
     if (ids.length === 0) return;
     const ended = new Set(ids);
-    for (const id of ended) void ipc.killAgentPty(id).catch(() => undefined);
+    for (const id of ended) {
+      void ipc.killAgentPty(id).catch(() => undefined);
+      disposeTerminal(id);
+    }
     setSessions((current) => current.filter((item) => !ended.has(item.id)));
     setSelectedSessionIds((current) =>
       Object.fromEntries(Object.entries(current).filter(([, id]) => !ended.has(id))),

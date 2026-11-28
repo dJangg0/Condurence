@@ -430,8 +430,8 @@ export function WorkspaceView({
             ) : null}
           </div>
           <div className="min-h-0 flex-1">
-            {/* Every session here stays mounted and only the selected one is shown. Remounting would replay the
-                backend's byte tail and lose the output above it, so a tab switch must not remount. */}
+            {/* Only the selected session is shown. Each terminal lives in the terminal store, so switching tabs,
+                workspaces or views moves it rather than rebuilding it and losing the output above it. */}
             {here.map((item) => (
               <div key={item.id} className={item.id === shown?.id ? "h-full" : "hidden"}>
                 <TerminalPane sessionId={item.id} interactive />

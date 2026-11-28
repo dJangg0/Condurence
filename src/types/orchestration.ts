@@ -69,7 +69,7 @@ export const PROVIDER_LABELS: Record<AgentProvider, string> = {
   claude: "Claude Code",
   codex: "Codex CLI",
   opencode: "OpenCode",
-  gemini: "Gemini CLI",
+  gemini: "Antigravity CLI",
 };
 
 export const RELATION_TYPES: readonly RelationType[] = ["delegates_to", "verifies", "escalates_to"];
