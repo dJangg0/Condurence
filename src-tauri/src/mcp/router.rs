@@ -1006,7 +1006,7 @@ impl Router {
         run.instances.insert(instance_id.clone(), instance.clone());
 
         let system = compiler::instructions(&run.graph, &target, &run.repo_root, true);
-        let invocation = self.build_invocation(run, &target, Mode::Headless, &system, &prompt, &instance_id)?;
+        let invocation = self.build_invocation(run, &target, Mode::Headless, &system, &prompt, &instance_id, false)?;
         let result_file = invocation.result_file.clone();
         let session_files: Vec<PathBuf> = invocation.cleanup.iter().cloned().chain(result_file.clone()).collect();
         // A read-only agent is checked against the worktree as it was before it started.
@@ -1316,6 +1316,7 @@ impl Router {
         system: &str,
         prompt: &str,
         instance_id: &str,
+        plan: bool,
     ) -> AppResult<Invocation> {
         let bridge = BridgeAddress {
             exe: &self.bridge_exe,
@@ -1334,6 +1335,7 @@ impl Router {
             &bridge,
             &run.run_dir,
             node.data.access,
+            plan,
         )
     }
 
@@ -1499,8 +1501,9 @@ impl Router {
 
         let system = compiler::instructions(&run.graph, &root, &run.repo_root, false);
         let prompt = format!("# Goal\n{goal}");
+        let plan = compiler::starts_in_plan_mode(&run.graph, &root);
         let launched = self
-            .build_invocation(&run, &root, Mode::Interactive, &system, &prompt, &root_instance.id)
+            .build_invocation(&run, &root, Mode::Interactive, &system, &prompt, &root_instance.id, plan)
             .and_then(|invocation| self.spawn_session(&run, &root_instance, invocation, &repo_root));
         let session = match launched {
             Ok(session) => session,
