@@ -8,6 +8,7 @@ import {
   RELATION_TYPES,
   type AgentProvider,
   type RelationType,
+  type AccessLevel,
   type WorktreeMode,
 } from "../types/orchestration";
 import { ModelPicker } from "./ModelPicker";
@@ -118,6 +119,17 @@ export function NodeInspector({
         >
           <option value="shared">Shared with upstream</option>
           <option value="isolated">Isolated child worktree</option>
+        </select>
+      </Field>
+
+      <Field label="Access" hint="Read-only agents cannot edit. Their worktree is checked after every run, and a change fails the attempt.">
+        <select
+          className={FIELD}
+          value={data.access}
+          onChange={(e) => onChange({ access: e.target.value as AccessLevel })}
+        >
+          <option value="read-write">Read and write</option>
+          <option value="read-only">Read only (reviewers, planners)</option>
         </select>
       </Field>
 

@@ -4,8 +4,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use open_conductor_lib::git::watcher::{workspace_id, WorkspaceWatchers};
-use open_conductor_lib::runtime::events::EventSink;
+use condurence_lib::git::watcher::{workspace_id, WorkspaceWatchers};
+use condurence_lib::runtime::events::EventSink;
 use serde_json::Value;
 
 #[derive(Default)]
@@ -30,7 +30,7 @@ async fn edits_produce_a_debounced_dirty_count() {
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "test@example.com"]);
-    git(&repo, &["config", "user.name", "OpenConductor Test"]);
+    git(&repo, &["config", "user.name", "Condurence Test"]);
     std::fs::write(repo.join("README.md"), "# demo\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);

@@ -4,8 +4,13 @@
  * Keep the two sides in sync; the Rust side is the source of truth for serialization.
  */
 
+import type { PullRequestStatus } from "./pulls";
+
 export type AgentProvider = "claude" | "codex" | "opencode" | "gemini";
 export type WorktreeMode = "shared" | "isolated";
+
+/** `read-only` nodes may read and report, but not edit. The runtime checks their worktree afterwards. */
+export type AccessLevel = "read-write" | "read-only";
 export type NodeStatus = "idle" | "running" | "waiting_approval" | "error";
 export type RelationType = "delegates_to" | "verifies" | "escalates_to";
 
@@ -20,6 +25,7 @@ export type AgentNodeData = {
   contextPaths: string[];
   systemPrompt: string;
   worktreeMode: WorktreeMode;
+  access: AccessLevel;
   /** Runtime-only. Always persisted as "idle". */
   status: NodeStatus;
 };
@@ -112,6 +118,65 @@ export type RunEvent = {
   createdMs: number;
 };
 
+export type RunStatus = "running" | "finished" | "stopped" | "interrupted";
+
+/** Per-repository Git settings, as on Conductor's Git page. Mirrors `RepoGitSettings` in `src-tauri/src/settings/mod.rs`. */
+export type RepoGitSettings = {
+  /** Remote-tracking branch that new workspaces start from, such as `origin/main`. */
+  baseRef: string;
+  /** Remote that receives pushes and PRs. */
+  remote: string;
+  deleteBranchOnArchive: boolean;
+  archiveOnMerge: boolean;
+  setUpstreamOnPush: boolean;
+};
+
+/** One orchestration run in the history. Mirrors `RunRecord` in `src-tauri/src/runtime/state_db.rs`. */
+export type RunRecord = {
+  id: string;
+  repoPath: string;
+  rootNodeId: string;
+  goal: string;
+  status: RunStatus;
+  startedMs: number;
+  endedMs: number | null;
+};
+
+/** One rate-limit window of a subscription plan. Mirrors `PlanWindow` in `src-tauri/src/usage/mod.rs`. */
+export type PlanWindow = {
+  /** Share of the window's allowance used, 0 to 100. */
+  usedPercent: number;
+  windowMinutes: number | null;
+  /** Epoch seconds. Past it, `usedPercent` is out of date. */
+  resetsAt: number | null;
+};
+
+/** The subscription's own usage meter, as the CLI last reported it (for example ChatGPT Free). */
+export type PlanLimit = {
+  plan: string | null;
+  primary: PlanWindow | null;
+  secondary: PlanWindow | null;
+  /** True when the CLI reported that a limit was hit. */
+  reached: boolean;
+  /** Epoch ms of the report. */
+  reportedMs: number;
+};
+
+/** Token usage one provider's CLI recorded for a run. Mirrors `src-tauri/src/usage/mod.rs`. */
+export type ProviderUsage = {
+  provider: AgentProvider;
+  /** False when that CLI's logs are not read yet, so the token counts are zero and not meaningful. */
+  measured: boolean;
+  /** Session files attributed to the run. */
+  sessions: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** The plan's usage meter, for providers whose logs carry one. Absent or null when none was reported. */
+  planLimit?: PlanLimit | null;
+};
+
 // ---------------------------------------------------------------- git & workspaces
 
 export type RepoMetadata = {
@@ -160,6 +225,42 @@ export type DiffHunk = {
   newStart: number;
   newLines: number;
   lines: DiffLine[];
+};
+
+/** What the All files tab lists for a workspace. Mirrors `git::files::FileListing`. */
+export type FileListing = {
+  /** Workspace-relative paths with `/` separators, sorted. */
+  files: string[];
+  /** The workspace has more files than were listed. */
+  truncated: boolean;
+};
+
+/** One file's text. `content` is empty for a binary file and cut at `size` > 1 MB. */
+export type FileContent = {
+  path: string;
+  content: string;
+  binary: boolean;
+  truncated: boolean;
+  size: number;
+};
+
+/** What archiving a workspace would discard and keep. Mirrors `workspaces::ArchivePreview`. */
+export type ArchivePreview = {
+  /** Files with changes that are not committed. Archiving discards them. */
+  uncommitted: string[];
+  /** Commits on the branch that the remote has no copy of. They stay on the branch. */
+  unpushed: number;
+  /** The branch's PR, when GitHub could be asked and it has one. */
+  pr: PullRequestStatus | null;
+  /** The PR is merged and the branch holds nothing newer, so deleting the branch loses nothing. */
+  delivered: boolean;
+};
+
+/** What happened to the branch. Mirrors `workspaces::ArchiveOutcome`. */
+export type ArchiveOutcome = {
+  branchDeleted: boolean;
+  /** Why the branch was kept although the settings ask to delete it. */
+  branchNote: string | null;
 };
 
 export type FileDiff = {

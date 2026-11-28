@@ -4,8 +4,10 @@
 //! thread streams UTF-8-safe chunks over `pty-output://{id}`, and a waiter thread publishes
 //! the exit code over `pty-exit://{id}` and to any task awaiting completion.
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -20,6 +22,13 @@ use crate::error::{AppError, AppResult};
 use crate::runtime::events::EventSink;
 
 const TERMINATE_GRACE: Duration = Duration::from_millis(1500);
+/// How long a session's leftover processes get to exit after its leader has gone.
+const SWEEP_GRACE: Duration = Duration::from_millis(1500);
+/// How long to wait for the reader to take the last output once nothing can write any more.
+const READER_DRAIN_WAIT: Duration = Duration::from_secs(2);
+/// Finished sessions whose output stays replayable. Older ones are released, so a long-lived app
+/// does not hold a terminal buffer for every agent it ever ran.
+const DEFAULT_RETENTION: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct SpawnSpec {
@@ -36,29 +45,48 @@ pub struct PtySession {
     pub id: String,
     pub cwd: PathBuf,
     pub pid: Option<u32>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    // Both are released when the session closes, which frees their file descriptors while the
+    // output stays readable. `None` means closed.
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     ring: Mutex<RingBuffer>,
     exit: watch::Sender<Option<i32>>,
 }
 
 impl PtySession {
     pub fn write(&self, data: &[u8]) -> AppResult<()> {
-        let mut writer = lock(&self.writer);
+        let mut guard = lock(&self.writer);
+        let writer = guard
+            .as_mut()
+            .ok_or_else(|| AppError::msg("the terminal session has closed"))?;
         writer.write_all(data)?;
         writer.flush()?;
         Ok(())
     }
 
+    /// Resizing a closed session is a no-op: a terminal view can resize after its process ended.
     pub fn resize(&self, cols: u16, rows: u16) -> AppResult<()> {
-        lock(&self.master)
-            .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(io_err)
+        match lock(&self.master).as_ref() {
+            Some(master) => master
+                .resize(PtySize {
+                    rows: rows.max(1),
+                    cols: cols.max(1),
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(io_err),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the OS handles behind this session have been released.
+    pub fn is_closed(&self) -> bool {
+        lock(&self.master).is_none() && lock(&self.writer).is_none()
+    }
+
+    fn close_handles(&self) {
+        lock(&self.writer).take();
+        lock(&self.master).take();
     }
 
     /// Replays buffered output (lossy UTF-8, ANSI sequences preserved for xterm.js).
@@ -79,21 +107,50 @@ impl PtySession {
     }
 }
 
+/// Live sessions, plus the order in which finished ones are kept for replay.
+struct Registry {
+    sessions: DashMap<String, Arc<PtySession>>,
+    finished: Mutex<VecDeque<String>>,
+    retention: usize,
+}
+
+impl Registry {
+    /// Marks a session finished. Past the retention limit the oldest finished sessions are released.
+    fn retire(&self, session_id: &str) {
+        let mut finished = lock(&self.finished);
+        finished.push_back(session_id.to_string());
+        while finished.len() > self.retention {
+            if let Some(oldest) = finished.pop_front() {
+                self.sessions.remove(&oldest);
+            }
+        }
+    }
+}
+
 pub struct PtyManager {
     events: Arc<dyn EventSink>,
-    sessions: DashMap<String, Arc<PtySession>>,
+    registry: Arc<Registry>,
 }
 
 impl PtyManager {
     pub fn new(events: Arc<dyn EventSink>) -> Self {
+        Self::with_retention(events, DEFAULT_RETENTION)
+    }
+
+    /// Keeps the output of the `retention` most recently finished sessions.
+    pub fn with_retention(events: Arc<dyn EventSink>, retention: usize) -> Self {
         Self {
             events,
-            sessions: DashMap::new(),
+            registry: Arc::new(Registry {
+                sessions: DashMap::new(),
+                finished: Mutex::new(VecDeque::new()),
+                retention,
+            }),
         }
     }
 
     pub fn spawn(&self, spec: SpawnSpec) -> AppResult<Arc<PtySession>> {
-        if self.sessions.contains_key(&spec.session_id) {
+        if self.registry.sessions.contains_key(&spec.session_id) {
             crate::error::bail!("session '{}' already exists", spec.session_id);
         }
 
@@ -127,28 +184,45 @@ impl PtyManager {
             id: spec.session_id.clone(),
             cwd: spec.cwd.clone(),
             pid,
-            writer: Mutex::new(writer),
-            master: Mutex::new(pair.master),
+            writer: Mutex::new(Some(writer)),
+            master: Mutex::new(Some(pair.master)),
             ring: Mutex::new(RingBuffer::new(RING_CAPACITY)),
             exit: exit_tx,
         });
-        self.sessions.insert(spec.session_id, session.clone());
+        self.registry.sessions.insert(spec.session_id, session.clone());
 
-        spawn_reader(self.events.clone(), session.clone(), reader);
-        spawn_waiter(self.events.clone(), session.clone(), child);
+        let (reader_done, drained) = mpsc::channel();
+        spawn_reader(self.events.clone(), session.clone(), reader, reader_done);
+        spawn_waiter(self.events.clone(), session.clone(), child, drained, self.registry.clone());
         Ok(session)
     }
 
     pub fn get(&self, session_id: &str) -> AppResult<Arc<PtySession>> {
-        self.sessions
+        self.registry
+            .sessions
             .get(session_id)
             .map(|entry| entry.value().clone())
             .ok_or_else(|| AppError::msg(format!("no terminal session '{session_id}'")))
     }
 
+    /// Drops a finished session and its replay buffer now, instead of waiting for it to age out.
+    /// A session that is still running is left alone. Returns whether one was released.
+    pub fn release(&self, session_id: &str) -> bool {
+        let finished = self
+            .registry
+            .sessions
+            .get(session_id)
+            .is_some_and(|entry| !entry.value().is_running());
+        if finished {
+            self.registry.sessions.remove(session_id);
+            lock(&self.registry.finished).retain(|id| id != session_id);
+        }
+        finished
+    }
+
     /// Blocking: sends SIGTERM to the process group and escalates after a grace period.
     pub fn terminate(&self, session_id: &str) {
-        if let Some(session) = self.sessions.get(session_id).map(|e| e.value().clone()) {
+        if let Some(session) = self.registry.sessions.get(session_id).map(|e| e.value().clone()) {
             if let Some(pid) = session.pid {
                 process_group::terminate_tree(pid, TERMINATE_GRACE);
             }
@@ -156,14 +230,14 @@ impl PtyManager {
     }
 
     pub fn terminate_all(&self) {
-        let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
+        let ids: Vec<String> = self.registry.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             self.terminate(&id);
         }
     }
 }
 
-fn spawn_reader(events: Arc<dyn EventSink>, session: Arc<PtySession>, mut reader: Box<dyn Read + Send>) {
+fn spawn_reader(events: Arc<dyn EventSink>, session: Arc<PtySession>, mut reader: Box<dyn Read + Send>, done: Sender<()>) {
     let event = format!("pty-output://{}", session.id);
     let thread_name = format!("pty-read-{}", short(&session.id));
     let spawned = std::thread::Builder::new().name(thread_name).spawn(move || {
@@ -192,21 +266,40 @@ fn spawn_reader(events: Arc<dyn EventSink>, session: Arc<PtySession>, mut reader
         if !carry.is_empty() {
             events.emit(&event, Value::String(String::from_utf8_lossy(&carry).into_owned()));
         }
+        let _ = done.send(());
     });
     if let Err(e) = spawned {
         eprintln!("failed to start PTY reader thread: {e}");
     }
 }
 
-fn spawn_waiter(events: Arc<dyn EventSink>, session: Arc<PtySession>, mut child: Box<dyn Child + Send + Sync>) {
+fn spawn_waiter(
+    events: Arc<dyn EventSink>,
+    session: Arc<PtySession>,
+    mut child: Box<dyn Child + Send + Sync>,
+    drained: Receiver<()>,
+    registry: Arc<Registry>,
+) {
     let thread_name = format!("pty-wait-{}", short(&session.id));
     let spawned = std::thread::Builder::new().name(thread_name).spawn(move || {
         let code = match child.wait() {
             Ok(status) => status.exit_code() as i32,
             Err(_) => -1,
         };
+        // Announce the exit first so whoever is waiting on it is not held up by the cleanup below.
         session.exit.send_replace(Some(code));
         events.emit(&format!("pty-exit://{}", session.id), json!({ "exitCode": code }));
+
+        // The leader is reaped. Stop whatever it left behind in its process group, so a background
+        // dev server or watcher cannot outlive the session.
+        if let Some(pid) = session.pid {
+            process_group::sweep_group(pid, SWEEP_GRACE);
+        }
+        // With nothing left to write, the reader sees end of file after the last output. Wait for it,
+        // so the history is complete before the handles are released.
+        let _ = drained.recv_timeout(READER_DRAIN_WAIT);
+        session.close_handles();
+        registry.retire(&session.id);
     });
     if let Err(e) = spawned {
         eprintln!("failed to start PTY waiter thread: {e}");

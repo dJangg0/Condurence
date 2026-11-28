@@ -7,16 +7,31 @@ export type Preferences = {
   displayName: string;
 };
 
-const STORAGE_KEY = "openconductor.preferences";
+export const STORAGE_KEY = "condurence.preferences";
+/** The key the app used before its rename. It is read when there is no current one, then removed. */
+export const EARLIER_STORAGE_KEY = "openconductor.preferences";
 const DEFAULTS: Preferences = { theme: "dark", displayName: "" };
 
-function readPreferences(): Preferences {
+/** Preferences from stored text. Anything unreadable falls back to the defaults. */
+export function parsePreferences(raw: string | null): Preferences {
+  if (!raw) return DEFAULTS;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
     const parsed = JSON.parse(raw) as Partial<Preferences>;
     const theme = parsed.theme === "light" || parsed.theme === "dark" || parsed.theme === "system" ? parsed.theme : DEFAULTS.theme;
     return { theme, displayName: typeof parsed.displayName === "string" ? parsed.displayName : DEFAULTS.displayName };
+  } catch {
+    return DEFAULTS;
+  }
+}
+
+/** The stored preferences: under the current key, else carried over from the earlier one. */
+export function storedPreferences(read: (key: string) => string | null): Preferences {
+  return parsePreferences(read(STORAGE_KEY) ?? read(EARLIER_STORAGE_KEY));
+}
+
+function readPreferences(): Preferences {
+  try {
+    return storedPreferences((key) => window.localStorage.getItem(key));
   } catch {
     return DEFAULTS;
   }
@@ -37,6 +52,7 @@ export function usePreferences() {
   useEffect(() => {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences));
+      window.localStorage.removeItem(EARLIER_STORAGE_KEY);
     } catch {
       // Storage unavailable: keep the preference for this session only.
     }

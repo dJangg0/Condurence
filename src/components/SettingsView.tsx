@@ -14,9 +14,9 @@ type AgentTab = {
 };
 
 const AGENTS: AgentTab[] = [
-  { id: "claude", label: "Claude Code", loginCommand: "claude auth login", pathVariable: "OPENCONDUCTOR_CLAUDE_BIN" },
-  { id: "codex", label: "Codex", loginCommand: "codex login", pathVariable: "OPENCONDUCTOR_CODEX_BIN" },
-  { id: "opencode", label: "OpenCode", loginCommand: "opencode auth login", pathVariable: "OPENCONDUCTOR_OPENCODE_BIN" },
+  { id: "claude", label: "Claude Code", loginCommand: "claude auth login", pathVariable: "CONDURENCE_CLAUDE_BIN" },
+  { id: "codex", label: "Codex", loginCommand: "codex login", pathVariable: "CONDURENCE_CODEX_BIN" },
+  { id: "opencode", label: "OpenCode", loginCommand: "opencode auth login", pathVariable: "CONDURENCE_OPENCODE_BIN" },
 ];
 
 const BUTTON_QUIET =

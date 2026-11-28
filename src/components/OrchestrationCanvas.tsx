@@ -14,8 +14,18 @@ import { EdgeFlowContext, FlowEdge } from "./FlowEdge";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { ApprovalQueue, RunLogPane, type LogLine } from "./RunPanel";
 import { RunTabs, type AgentTab } from "./RunTabs";
+import { TaskLedger } from "./TaskLedger";
+import { applyLedgerEvent, EMPTY_LEDGER, ledgerFromEvents, type Ledger } from "../lib/ledger";
 import { TerminalPane } from "./TerminalPane";
+import { PaneHandle } from "./PaneHandle";
+import { UsageMeter } from "./UsageMeter";
+import { ChangesButton } from "./ChangesButton";
+import { ChangesPanel } from "./ChangesPanel";
+import { useRunChangeCount } from "../lib/useRunChangeCount";
+import { transcriptItems } from "../lib/history";
+import { goalSubmit } from "../lib/goalInput";
 import { events, ipc } from "../lib/ipc";
+import { describeHandoff } from "../lib/handoff";
 import {
   applyStatus as applyEdgeStatus,
   applyToolCall,
@@ -40,6 +50,8 @@ import {
   RELATION_LABELS,
   type AgentNodeData,
   type ApprovalRequestEvent,
+  type ProviderUsage,
+  type RunRecord,
   type RoutingEdgeData,
   type RunEvent,
   type WorktreeMode,
@@ -47,12 +59,21 @@ import {
 
 const NODE_TYPES = { agentNode: AgentNode };
 const EDGE_TYPES = { flow: FlowEdge };
+/** How often the usage meter re-reads provider logs while a run is live. */
+const USAGE_POLL_MS = 4000;
+/** Starting sizes of the terminal and run-log pane, and the smallest each may be dragged to. */
+const DEFAULT_BOTTOM_HEIGHT = 288;
+const DEFAULT_LOG_WIDTH = 384;
+const MIN_BOTTOM_HEIGHT = 120;
+const MIN_CANVAS_HEIGHT = 200;
+const MIN_LOG_WIDTH = 220;
+const MIN_TERMINAL_WIDTH = 280;
 
 type Notice = { tone: "info" | "error"; text: string };
 type Selection = { kind: "node" | "edge"; id: string } | null;
 type ActiveRun = { runId: string; rootId: string };
 
-function describeJournalEntry(kind: string, payload: Record<string, unknown>): string {
+function describeJournalEntry(kind: string, payload: Record<string, unknown>, nodeId: string | null): string {
   switch (kind) {
     case "status":
       return `status → ${String(payload.status)}`;
@@ -60,13 +81,25 @@ function describeJournalEntry(kind: string, payload: Record<string, unknown>): s
       return `tool call ${String(payload.tool)}`;
     case "approval":
       return payload.approved ? "approval granted" : "approval rejected";
+    case "handoff":
+      return describeHandoff(payload, nodeId);
+    case "gate": {
+      const verdict = payload.passed ? "passed" : payload.timedOut ? "timed out" : `failed (exit ${String(payload.exitCode)})`;
+      return `gate ${String(payload.gate)} ${verdict}`;
+    }
     default:
       return kind;
   }
 }
 
-/** Topology editor plus run controls. Nodes are railway-style cards; edges are routing rules. */
-export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
+/**
+ * Topology editor plus run controls. Nodes are railway-style cards; edges are routing rules.
+ *
+ * The canvas stays mounted while the user is in another view, so a run's progress is not lost.
+ * `active` is false then: the run keeps listening, but the timers that only matter to someone
+ * looking, and the save shortcut, stand down.
+ */
+export function OrchestrationCanvas({ repoPath, active = true }: { repoPath: string; active?: boolean }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<AgentFlowNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RoutingFlowEdge>([]);
   const [worktreeDefault, setWorktreeDefault] = useState<WorktreeMode>("isolated");
@@ -87,7 +120,25 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
   const [sessions, setSessions] = useState<Record<string, string>>({});
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [log, setLog] = useState<LogLine[]>([]);
+  // The task ledger, folded from the same journal events as the log, and which of the two the right panel shows.
+  const [ledger, setLedger] = useState<Ledger>(EMPTY_LEDGER);
+  const [rightPanel, setRightPanel] = useState<"log" | "tasks">("log");
+  // Sizes of the bottom pane, changed by dragging its handles. Measured bounds are read from these refs.
+  const [bottomHeight, setBottomHeight] = useState(DEFAULT_BOTTOM_HEIGHT);
+  const [logWidth, setLogWidth] = useState(DEFAULT_LOG_WIDTH);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const paneRowRef = useRef<HTMLDivElement>(null);
   const [approvals, setApprovals] = useState<ApprovalRequestEvent[]>([]);
+  // Usage for the latest run, live while it runs and kept after it stops.
+  const [usageRunId, setUsageRunId] = useState<string | null>(null);
+  const [usage, setUsage] = useState<ProviderUsage[]>([]);
+  // Past runs of this repository. They are not listed on screen. The Changes button and the review
+  // pane read the latest of them.
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  // The full-width review pane: the run it belongs to, and the workspace it opened on (none: the first).
+  const [changesFor, setChangesFor] = useState<{ runId: string; path: string | null } | null>(null);
+  // The journal of the run under review, whose handoffs a review can be given.
+  const [reviewEvents, setReviewEvents] = useState<RunEvent[]>([]);
   // Run progress: which edges are carrying a message, when each agent started, and its last result.
   const [edgeFlow, setEdgeFlow] = useState<EdgeFlowState>({});
   const [startedAt, setStartedAt] = useState<Record<string, number>>({});
@@ -120,12 +171,13 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     return () => clearTimeout(timer);
   }, [edgeFlow]);
 
-  // Tick once a second while a run is active, so elapsed times keep counting.
+  // Tick once a second while a run is active and in view, so elapsed times keep counting.
   useEffect(() => {
-    if (!run) return;
+    if (!run || !active) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [run]);
+  }, [run, active]);
 
   // Load the topology from disk whenever the repository changes.
   useEffect(() => {
@@ -207,6 +259,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
           const tool = entry.payload.tool;
           setEdgeFlow((current) => applyToolCall(current, flowEdges(), caller, tool));
         }
+        setLedger((current) => applyLedgerEvent(current, entry.kind, entry.payload, entry.nodeId));
         setLog((current) => [
           ...current.slice(-399),
           {
@@ -214,7 +267,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
             ts: entry.ts,
             nodeId: entry.nodeId,
             kind: entry.kind,
-            message: describeJournalEntry(entry.kind, entry.payload),
+            message: describeJournalEntry(entry.kind, entry.payload, entry.nodeId),
           },
         ]);
       })
@@ -227,6 +280,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     // recover the latest status and terminal session per node from the journal.
     void ipc.listRunEvents(runId, 1000).then((journal: RunEvent[]) => {
       if (disposed) return;
+      setLedger(ledgerFromEvents(journal));
       let replayedFlow: EdgeFlowState = {};
       const replayedStarts: Record<string, number> = {};
       for (const event of journal) {
@@ -252,6 +306,71 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     };
   }, [run, setNodes]);
 
+  // Usage for the shown run: read now, re-read every few seconds while it is live, and once more
+  // after it stops so the final numbers land. A failed read keeps the last values on screen. Out
+  // of view it does not poll, and it reads again the moment the canvas is shown.
+  useEffect(() => {
+    if (!usageRunId || !active) return;
+    let cancelled = false;
+    const refresh = () => {
+      ipc
+        .runUsage(usageRunId)
+        .then((rows) => {
+          // Keep the same array when nothing changed, so the canvas does not re-render every poll.
+          if (!cancelled) setUsage((current) => (JSON.stringify(current) === JSON.stringify(rows) ? current : rows));
+        })
+        .catch((error: unknown) => console.warn("[usage] run usage read failed; keeping last values", error));
+    };
+    refresh();
+    if (run?.runId !== usageRunId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = setInterval(refresh, USAGE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [usageRunId, run, active]);
+
+  // The newest log line id moves whenever a run journals something, so it drives live refreshes.
+  const lastLogId = log[log.length - 1]?.id ?? 0;
+
+  // The run list refreshes when the repository changes, when a run starts or stops, and as a live
+  // run journals events.
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .listRuns(repoPath)
+      .then((list) => {
+        if (!cancelled) setRuns(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repoPath, run?.runId, lastLogId]);
+
+  // The journal of the run under review. A live run reloads as its events arrive.
+  const eventsRunId = changesFor?.runId ?? null;
+  useEffect(() => {
+    if (!eventsRunId) {
+      setReviewEvents([]);
+      return;
+    }
+    let cancelled = false;
+    ipc
+      .listRunEvents(eventsRunId, 1000)
+      .then((events) => {
+        if (!cancelled) setReviewEvents(events);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [eventsRunId, lastLogId]);
+
   const persist = useCallback(async (): Promise<boolean> => {
     const graph = fromFlow(nodes, edges, worktreeDefault);
     const problems = validateGraph(graph);
@@ -269,7 +388,9 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     persist().catch((error: unknown) => setNotice({ tone: "error", text: String(error) }));
   }, [persist]);
 
+  // Only the canvas in view takes ⌘S, so a hidden one never saves behind the user's back.
   useEffect(() => {
+    if (!active) return;
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -278,7 +399,7 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [saveFromShortcut]);
+  }, [saveFromShortcut, active]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -359,8 +480,11 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       // The backend reads the topology from disk, so a dirty canvas must be saved first.
       if (dirty && !(await persist())) return;
       const runId = await ipc.startOrchestrationRun(repoPath, rootId, trimmedGoal);
+      setUsageRunId(runId);
+      setUsage([]);
       setSessions({});
       setLog([]);
+      setLedger(EMPTY_LEDGER);
       setApprovals([]);
       setEdgeFlow({});
       setStartedAt({});
@@ -369,6 +493,8 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       setFocusNodeId(rootId);
       setNodes((current) => current.map((node) => ({ ...node, data: { ...node.data, status: "idle" } })));
       setRun({ runId, rootId });
+      // The goal now lives in the run. Clearing the field keeps Enter from sending it again.
+      setGoal("");
       setNotice({
         tone: "info",
         text: `Run started. "${rootId}" is interactive: converse with it in the terminal below. If Claude asks whether you trust the folder, choose "Yes, I trust this folder" (press ↓ then Enter).`,
@@ -378,6 +504,29 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Types a message into the CEO's terminal, as if it had been typed there and submitted. */
+  const sendToOrchestrator = async (message: string) => {
+    if (!run) return;
+    const sessionId = sessions[run.rootId];
+    if (!sessionId) {
+      setNotice({ tone: "error", text: "The orchestrator's terminal is not ready yet. Try again in a moment." });
+      return;
+    }
+    try {
+      await ipc.writeAgentPty(sessionId, `${message}\r`);
+      setGoal("");
+    } catch (error) {
+      setNotice({ tone: "error", text: String(error) });
+    }
+  };
+
+  /** Enter in the goal field: start a run, or send the text to the CEO while one is live. */
+  const submitGoal = () => {
+    const action = goalSubmit({ text: goal, runActive: run !== null, busy, hasAgents: nodes.length > 0 });
+    if (action.kind === "start") void startRun();
+    else if (action.kind === "send") void sendToOrchestrator(action.message);
   };
 
   const stopRun = async () => {
@@ -407,6 +556,12 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
   };
 
   const nameOf = (nodeId: string) => nodes.find((node) => node.id === nodeId)?.data.name ?? nodeId;
+  // The run whose changes a toolbar press opens: the live one, else the latest.
+  const changesRunId = run?.runId ?? runs[0]?.id ?? null;
+  const changesRun = changesFor ? (runs.find((item) => item.id === changesFor.runId) ?? null) : null;
+  // The files the run has changed, for the toolbar button. It follows the agents' edits, the run's
+  // journal and the review pane closing, which is where a PR may have been made.
+  const changeCount = useRunChangeCount(repoPath, changesRunId, `${lastLogId}|${changesFor ? "open" : "closed"}`);
   const selectedNode = selection?.kind === "node" ? nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.kind === "edge" ? edges.find((edge) => edge.id === selection.id) : undefined;
   const problems = validateGraph(fromFlow(nodes, edges, worktreeDefault));
@@ -424,10 +579,9 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
       };
     })
     .sort((a, b) => Number(b.isRoot) - Number(a.isRoot) || (a.startedAt ?? 0) - (b.startedAt ?? 0));
-  const focusIsInteractiveRoot = run !== null && focusNodeId === run.rootId;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900/70 px-3 py-2">
         <button type="button" onClick={addAgent} className="rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-100 hover:bg-zinc-700">
           + Agent
@@ -472,8 +626,16 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
         <input
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
-          placeholder="Goal for the orchestrator, e.g. add dark mode to settings"
-          disabled={run !== null}
+          onKeyDown={(event) => {
+            // Enter confirms an IME composition without submitting, so leave that Enter alone.
+            if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            submitGoal();
+          }}
+          placeholder={
+            run ? "Message the CEO, then press Enter" : "Goal for the orchestrator, e.g. add dark mode to settings"
+          }
+          disabled={busy}
           className="min-w-48 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-indigo-500 disabled:opacity-50"
         />
         {run ? (
@@ -490,6 +652,11 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
             Run topology
           </button>
         )}
+        <ChangesButton
+          count={changeCount}
+          hasRun={changesRunId !== null}
+          onClick={() => changesRunId && setChangesFor({ runId: changesRunId, path: null })}
+        />
       </div>
 
       {notice ? (
@@ -535,6 +702,12 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
           {nodes.length === 0 ? (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
               Add an agent, then drag from one node's handle to another to wire a routing rule.
+            </div>
+          ) : null}
+          {usageRunId && usage.length > 0 ? (
+            // Floats over the topology's top-left. Pointer events pass through to the canvas.
+            <div className="pointer-events-none absolute left-3 top-3 z-10">
+              <UsageMeter rows={usage} live={run?.runId === usageRunId} />
             </div>
           ) : null}
         </div>
@@ -597,7 +770,18 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
         </aside>
       </div>
 
-      <div className="flex h-72 shrink-0 border-t border-zinc-800">
+      <PaneHandle
+        axis="y"
+        label="Resize terminal and run log"
+        size={bottomHeight}
+        onResize={setBottomHeight}
+        bounds={() => ({ min: MIN_BOTTOM_HEIGHT, max: (rootRef.current?.clientHeight ?? 0) - MIN_CANVAS_HEIGHT })}
+      />
+      <div
+        ref={paneRowRef}
+        className="flex min-h-0 shrink-0 max-h-[calc(100%-12rem)]"
+        style={{ height: bottomHeight }}
+      >
         <div className="flex min-w-0 flex-1 flex-col">
           <RunTabs
             tabs={tabs}
@@ -616,23 +800,58 @@ export function OrchestrationCanvas({ repoPath }: { repoPath: string }) {
             now={now}
           />
           <div className="min-h-0 flex-1">
-            {focusSession ? (
-              <TerminalPane key={focusSession} sessionId={focusSession} interactive={focusIsInteractiveRoot} />
-            ) : (
+            {/* Every agent's terminal stays mounted and only the focused one is shown. Follow moves the focus
+                between agents, and remounting the orchestrator's terminal replayed a byte tail that dropped its
+                earlier progress each time focus came back. */}
+            {Object.entries(sessions).map(([nodeId, sessionId]) => (
+              <div key={sessionId} className={nodeId === focusNodeId ? "h-full" : "hidden"}>
+                <TerminalPane sessionId={sessionId} interactive={run !== null && nodeId === run.rootId} />
+              </div>
+            ))}
+            {focusSession ? null : (
               <div className="p-4 text-xs text-zinc-500">
                 {run ? "Waiting for agents to start…" : "Run the topology to open live agent terminals. Click a node to inspect its stream."}
               </div>
             )}
           </div>
         </div>
-        <div className="flex w-96 shrink-0 flex-col border-l border-zinc-800">
-          <div className="border-b border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300">Run log</div>
+        <PaneHandle
+          axis="x"
+          label="Resize run log width"
+          size={logWidth}
+          onResize={setLogWidth}
+          bounds={() => ({ min: MIN_LOG_WIDTH, max: (paneRowRef.current?.clientWidth ?? 0) - MIN_TERMINAL_WIDTH })}
+        />
+        <div className="flex shrink-0 flex-col" style={{ width: logWidth }}>
+          <div className="flex items-center gap-1 border-b border-zinc-800 px-2 py-1 text-xs">
+            {(["log", "tasks"] as const).map((panel) => (
+              <button
+                key={panel}
+                type="button"
+                onClick={() => setRightPanel(panel)}
+                className={`rounded px-2 py-0.5 ${rightPanel === panel ? "bg-zinc-800 font-medium text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
+              >
+                {panel === "log" ? "Run log" : "Tasks"}
+              </button>
+            ))}
+          </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <RunLogPane lines={log} />
+            {rightPanel === "log" ? <RunLogPane lines={log} /> : <TaskLedger ledger={ledger} nameOf={nameOf} />}
           </div>
           <ApprovalQueue requests={approvals} nameOf={nameOf} onDecide={(request, approved) => void decide(request, approved)} />
         </div>
       </div>
+
+      {changesFor && changesRun ? (
+        <ChangesPanel
+          key={changesRun.id}
+          run={changesRun}
+          initialPath={changesFor.path}
+          transcript={transcriptItems(reviewEvents)}
+          nameOf={nameOf}
+          onClose={() => setChangesFor(null)}
+        />
+      ) : null}
     </div>
   );
 }

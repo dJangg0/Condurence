@@ -148,30 +148,6 @@ pub async fn create_worktree(
         .ok_or_else(|| AppError::msg("worktree was created but could not be listed"))
 }
 
-/// Removes `<repo>/.worktrees/<folder>`. Git refuses when the worktree has uncommitted
-/// changes, which is the safe default. The branch is deleted only if it is fully merged.
-pub async fn remove_worktree(
-    locks: &RepoLocks,
-    repo_path: &Path,
-    branch_name: &str,
-    folder_name: &str,
-) -> AppResult<()> {
-    if !is_valid_folder(folder_name) {
-        crate::error::bail!("'{folder_name}' is not a valid workspace folder name");
-    }
-    let root = repo_root(repo_path).await?;
-    let target = root.join(WORKTREES_DIR).join(folder_name);
-    let target_str = target.to_string_lossy().into_owned();
-
-    let _permit = locks.acquire(&root).await;
-    cmd::run(&root, &["worktree", "remove", target_str.as_str()]).await?;
-    if is_valid_branch(branch_name) {
-        // Safe delete (-d): refuses unmerged branches, so no committed work is lost.
-        let _ = cmd::raw(&root, &["branch", "-d", branch_name]).await;
-    }
-    Ok(())
-}
-
 /// Merges `branch` into `target` in the main checkout. The main checkout must already be
 /// on `target`. Conflicts are reported and the merge is aborted, leaving the tree clean.
 pub async fn merge_worktree(

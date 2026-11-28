@@ -19,7 +19,7 @@ This Software Requirements Specification (SRS) defines the functional, interface
 ### 1.2 Scope
 This specification covers the **Agent Orchestration** module accessible from Condurence's primary sidebar navigation, along with its underlying Rust runtime services:
 * **Visual Topology Canvas:** A Railway-inspired infinite drag-and-drop graph field where users instantiate AI agent service nodes, configure personas, skills, context scopes, and CLI providers, and connect nodes via directed relationship edges (analogous to Entity-Relationship Diagrams and n8n workflows).
-* **Graph Serialization & Persistence:** Version-controllable repository storage (`.orchestrator/graph.json`) and local execution telemetry (`~/.openconductor/state.db`).
+* **Graph Serialization & Persistence:** Version-controllable repository storage (`.orchestrator/graph.json`) and local execution telemetry (`~/.condurence/state.db`).
 * **Dynamic MCP Compilation & Routing:** An embedded local MCP server and `stdio` proxy that translates canvas edges into callable inter-agent tools for locally authenticated terminal coding agents (`claude`, `codex`, `opencode`, `gemini`).
 * **Multi-Agent Execution Engine:** Lifecycle management, Git worktree isolation, retry/loop guards, and human-in-the-loop approval gates.
 
@@ -72,7 +72,7 @@ The Multi-Agent Orchestration Subsystem operates entirely locally on the user's 
 ## 3. External Interface Requirements
 
 ### 3.1 User Interfaces
-* **UI-01 Sidebar Mode Switcher:** The primary left navigation rail shall provide a persistent **Agent Orchestration** tab alongside **Workspaces**, preserving canvas state and active run telemetry when switching views.
+* **UI-01 Sidebar Mode Switcher:** The primary left navigation rail shall provide a persistent **Agent Orchestration** tab alongside **Workspaces**, preserving canvas state and active run telemetry when switching views, opening settings, or moving to another repository. Each repository's canvas shall stay mounted (hidden, with its layout intact so terminals keep their size) from the first time it opens, and a hidden canvas shall take no clicks, focus or shortcuts.
 * **UI-02 Railway-Style Service Cards:** Each node on the canvas shall render as a structured card displaying:
   * Agent Name and live execution status indicator (`idle`, `running`, `waiting_approval`, `error`).
   * Assigned Role label and color-coded CLI Provider/Model badge.
@@ -80,6 +80,10 @@ The Multi-Agent Orchestration Subsystem operates entirely locally on the user's 
   * Top target handle (incoming edges) and bottom source handle (outgoing edges).
 * **UI-03 Contextual Inspector Drawer:** Selecting a node or edge shall open a right-hand inspector panel allowing live editing of all node/edge properties without modal interruptions.
 * **UI-04 Live Terminal & Log Drawer:** Clicking an active or completed node's terminal icon shall open an embedded `xterm.js` viewer replaying buffered ANSI output from that node's PTY session.
+* **UI-05 Run Review Pane:** A **Changes** button in the orchestration toolbar, beside **Run topology**, shall show the run's diffstat as GitHub does, lines added in green and lines removed in red (committed and uncommitted together, each file counted once across the run's workspaces), and shall follow the agents' edits live. It shall open a full-width review pane for the live run, else the run being read, else the latest run. The pane shall list the run's workspaces as tabs and offer two tabs per workspace:
+  * **All files:** a searchable file tree and a read-only viewer. It shall list only what git lists for the workspace (tracked files and untracked files that are not ignored), mark changed files with their status, and offer a way to the file's diff.
+  * **Changes:** the pull request diff (commits since the configured base) and the uncommitted edits, with their files. It shall open on whichever of the two has content, and follow the workspace live while its agents work.
+* **UI-06 Create PR Split Button:** The top right of the review pane shall hold **Create PR** as a split button. Its main action follows the workspace: *Create PR* for a branch with no PR, *Commit & create PR…* when it has uncommitted edits (confirmed first, listing the files and the commit message), or a link to the PR once one is open or merged. A workspace on the base branch itself, such as the repository's main checkout where the root and shared agents work, cannot open a PR from it: when it holds work, the main action shall be *Create branch & PR…*, which after a confirmation that lists each step moves the work (commits and uncommitted edits) onto a new, editable `oc/<run>/changes` branch, commits, pushes and opens the PR, leaving the local base branch unchanged. The chevron shall offer the committed work alone, copying the PR link, and copying the branch name. Nothing shall be committed, pushed or opened until the user presses a button.
 
 ### 3.2 Software & CLI Provider Interfaces
 The Rust backend shall invoke installed CLI binaries using provider-specific adapters:
@@ -87,7 +91,7 @@ The Rust backend shall invoke installed CLI binaries using provider-specific ada
 | Provider Key | CLI Binary | Headless / Delegated Execution Flag | Ephemeral MCP Injection Mechanism |
 | :--- | :--- | :--- | :--- |
 | `claude` | `claude` | `claude -p "{prompt}" --output-format stream-json` | `--mcp-config {tmp}/claude-mcp.json` |
-| `codex` | `codex` | `codex exec "{prompt}"` | `-c mcp_servers.openconductor...` CLI override flags |
+| `codex` | `codex` | `codex exec "{prompt}"` | `-c mcp_servers.Condurence...` CLI override flags |
 | `opencode` | `opencode` | `opencode run "{prompt}"` | `OPENCODE_CONFIG={tmp}/opencode.json` env var |
 | `gemini` | `gemini` | `gemini -p "{prompt}"` | Isolated `.gemini/settings.json` MCP server entry |
 
@@ -97,8 +101,8 @@ The Rust backend shall invoke installed CLI binaries using provider-specific ada
 
 ### 3.4 Storage & Filesystem Interfaces
 * **Graph Definition File:** `{repo_root}/.orchestrator/graph.json` (UTF-8, pretty-printed JSON).
-* **Skill Definitions Directory:** `{repo_root}/.orchestrator/skills/{skill_name}.md` with global fallback `~/.openconductor/skills/{skill_name}.md`.
-* **Runtime State Database:** `~/.openconductor/state.db` (SQLite in `WAL` mode storing run history, inter-agent call traces, and audit logs).
+* **Skill Definitions Directory:** `{repo_root}/.orchestrator/skills/{skill_name}.md` with global fallback `~/.condurence/skills/{skill_name}.md`.
+* **Runtime State Database:** `~/.condurence/state.db` (SQLite in `WAL` mode storing run history, inter-agent call traces, and audit logs).
 
 ---
 
@@ -150,7 +154,7 @@ The Rust backend shall invoke installed CLI binaries using provider-specific ada
 | **FR-EXEC-02** | Must | **Real-Time Canvas Telemetry:** The runtime shall emit `node-status://{node_id}` events (`idle`, `running`, `waiting_approval`, `error`) and edge traversal animations to the frontend within 100 ms of state transitions.<br>*Verification:* UI inspection during live multi-agent execution. |
 | **FR-EXEC-03** | Must | **Cycle & Retry Enforcement:** The router shall track `edge_attempts` per `edge_id` in `ExecutionContext`. When an invocation exceeds `edge.maxRetries`, the router shall not spawn the target agent and shall instead return a structured error message instructing the caller to escalate or summarize the blocker.<br>*Verification:* Unit test verifying graceful refusal on attempt `maxRetries + 1`. |
 | **FR-EXEC-04** | Must | **Global Run Cancellation:** Clicking **Stop Run** in the UI shall trigger a `tokio_util::sync::CancellationToken`, immediately terminating all active PTY process trees associated with `run_id` and cleaning up temporary MCP config directories.<br>*Verification:* Process table inspection on macOS/Windows confirming zero surviving child processes after cancellation. |
-| **FR-EXEC-05** | Must | **Execution Audit Log Persistence:** All edge invocations, input payloads, timestamps, retry counts, and returned summaries shall be persisted in `~/.openconductor/state.db` for post-run inspection.<br>*Verification:* SQLite query check after completing a multi-hop run. |
+| **FR-EXEC-05** | Must | **Execution Audit Log Persistence:** All edge invocations, input payloads, timestamps, retry counts, and returned summaries shall be persisted in `~/.condurence/state.db` for post-run inspection.<br>*Verification:* SQLite query check after completing a multi-hop run. |
 
 ### 4.6 Worktree Isolation & Conflict Prevention
 
@@ -159,6 +163,8 @@ The Rust backend shall invoke installed CLI binaries using provider-specific ada
 | **FR-GIT-01** | Must | **Repository-Level Git Mutation Lock:** All mutating Git operations (`worktree add`, `worktree remove`, `branch`) shall acquire a per-repository `tokio::sync::Semaphore` (1 permit) keyed by canonical repository path to prevent `.git/index.lock` failures during parallel fan-out.<br>*Verification:* Stress test spawning 5 parallel isolated nodes simultaneously without Git lock errors. |
 | **FR-GIT-02** | Must | **Windows Path & Line-Ending Safety:** All worktree creation commands shall pass `-c core.longpaths=true` and `-c core.autocrlf=input` to `git`.<br>*Verification:* Unit test inspecting generated `git` command arguments. |
 | **FR-GIT-03** | Should | **Worktree Merge-Back Action:** Upon completion of an orchestration run, the user shall be able to merge or squash-merge the resulting worktree branch back into the repository's base branch from the UI.<br>*Verification:* End-to-end test merging a multi-agent feature branch cleanly. |
+| **FR-GIT-04** | Should | **Read-Only Workspace File Browsing:** `list_worktree_files` and `read_worktree_file` shall expose only files git lists for the workspace. Ignored files (such as `.env`), paths outside the workspace, `.git` contents and symlinks that resolve outside the workspace shall be refused, and a file shall be returned as at most 1 MiB of text, flagged `truncated` or `binary` where it applies.<br>*Verification:* Integration test `worktree_files` on a real repository. |
+| **FR-GIT-05** | Should | **Manual Workspace Archive:** A temporary workspace shall be archived only by the user's own action, from its sidebar row or its header, and never because its PR was created or merged (the repository's opt-in "Archive on merge" setting excepted, and it shall not discard changes). The confirmation shall list uncommitted files, which are discarded only on an explicit confirmation, note commits that are not on GitHub, and state what happens to the branch. The branch shall be deleted only when "Delete branch on archive" is on and nothing is lost: it is merged in git, or GitHub reports its PR merged with nothing newer on the branch (so squash merges are included).<br>*Verification:* Integration test `workspace_archive` on a real repository with a stand-in `gh`. |
 
 ---
 

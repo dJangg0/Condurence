@@ -280,6 +280,18 @@ pub fn changed_file_count(worktree: &Path) -> AppResult<usize> {
     Ok(parse_status_porcelain_v2(&output).len())
 }
 
+/// Changes committed on the branch since it left `base`, which is the content a PR would show.
+/// `base` is a ref such as `origin/main`, and the caller checks it before it reaches git.
+pub async fn branch_diff(worktree: &Path, base: &str) -> AppResult<Vec<FileDiff>> {
+    let range = format!("{base}...HEAD");
+    let text = cmd::run(
+        worktree,
+        &["diff", "--no-color", "--no-ext-diff", "--unified=3", "-M", range.as_str()],
+    )
+    .await?;
+    Ok(parse_unified_diff(&text))
+}
+
 /// Full review payload for a worktree: tracked changes against HEAD plus synthesized
 /// diffs for untracked files.
 pub async fn worktree_diff(worktree: &Path) -> AppResult<Vec<FileDiff>> {

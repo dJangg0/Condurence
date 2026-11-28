@@ -4,8 +4,8 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use open_conductor_lib::auth;
-use open_conductor_lib::graph::AgentProvider;
+use condurence_lib::auth;
+use condurence_lib::graph::AgentProvider;
 
 fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);

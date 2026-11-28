@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon, ChevronUpDownIcon } from "./icons";
 import { SignInDialog, startGitHubSignIn, startProviderSignIn } from "./SignInDialog";
+import { TokenUsageSection, USAGE_SUMMARY_DAYS } from "./TokenUsageSection";
+import { ipc } from "../lib/ipc";
 import type { Connections } from "../lib/connections";
 import type { Preferences, ThemeChoice } from "../lib/preferences";
+import type { ProviderUsage } from "../types/orchestration";
 
 const THEMES: Array<{ id: ThemeChoice; label: string }> = [
   { id: "system", label: "System" },
@@ -57,6 +60,9 @@ export function ProfileMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const [signIn, setSignIn] = useState<{ sessionId: string; title: string } | null>(null);
   const [signInError, setSignInError] = useState<string | null>(null);
+  // Token usage is read when the pane opens, not on every render, because it scans session logs.
+  const [usage, setUsage] = useState<ProviderUsage[] | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
 
   const { github, providers } = connections;
   const name = preferences.displayName.trim() || github?.name || github?.login || "You";
@@ -80,6 +86,23 @@ export function ProfileMenu({
   ];
   const connectedCount = rows.filter((row) => row.state === "signedIn").length;
   const checking = rows.some((row) => row.state === "checking");
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setUsageError(null);
+    ipc
+      .providerUsageSummary()
+      .then((rows) => {
+        if (!cancelled) setUsage(rows);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setUsageError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -116,7 +139,7 @@ export function ProfileMenu({
   return (
     <div ref={rootRef} className="relative p-2">
       {open ? (
-        <div className="absolute bottom-full left-2 z-10 mb-1 w-72 rounded-lg border border-zinc-700 bg-zinc-900 p-1.5 shadow-2xl shadow-black/50">
+        <div className="absolute bottom-full left-2 z-10 mb-1 max-h-[70vh] w-72 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1.5 shadow-2xl shadow-black/50">
           <div className={SECTION_LABEL}>Profile</div>
           <label className="block px-1 pb-1">
             <span className="sr-only">Display name</span>
@@ -166,6 +189,9 @@ export function ProfileMenu({
           <p className="px-2 pb-1 pt-1.5 text-[10px] leading-relaxed text-zinc-500">
             Sign-in runs each CLI&apos;s own login. Condurence never sees your tokens.
           </p>
+
+          <div className={SECTION_LABEL}>Token usage · last {USAGE_SUMMARY_DAYS} days</div>
+          <TokenUsageSection rows={usage} error={usageError} />
 
           <div className={SECTION_LABEL}>Appearance</div>
           <div role="radiogroup" aria-label="Appearance" className="space-y-0.5">

@@ -5,7 +5,7 @@ A native Agentic Development Environment built with **Tauri v2** (Rust) and **Re
 - **Workspaces:** parallel, isolated `git worktree` workspaces with live diffs and PTY terminals (xterm.js).
 - **Agent Orchestration:** a railway-style canvas (React Flow) where agent nodes are wired into routing rules (`delegates_to`, `verifies`, `escalates_to`) and executed through a local MCP router.
 
-The topology is committed to each repository as `.orchestrator/graph.json`. Runtime telemetry lives in `~/.openconductor/state.db`.
+The topology is committed to each repository as `.orchestrator/graph.json`. Runtime telemetry lives in `~/.condurence/state.db`.
 
 ## Quick start
 
@@ -67,7 +67,55 @@ cd src-tauri && cargo test
 
 `cargo test` includes an end-to-end orchestration test. It runs the real PTY, loopback MCP server, `Condurence --mcp-bridge` stdio shim, router and state DB, with a Python stand-in for the `claude` CLI. It covers delegation, the isolated child worktree, the `maxRetries` budget, and approve and reject on approval gates.
 
-To point Condurence at a specific CLI build, set `OPENCONDUCTOR_<PROVIDER>_BIN`, for example `OPENCONDUCTOR_CLAUDE_BIN=/opt/tools/claude`.
+To point Condurence at a specific CLI build, set `CONDURENCE_<PROVIDER>_BIN`, for example `CONDURENCE_CLAUDE_BIN=/opt/tools/claude`. The older `OPENCONDUCTOR_<PROVIDER>_BIN` names still work.
+
+## Gates and retries
+
+A delegated agent's `completed` report is a claim. The repository's **gates** decide whether it stands. Put them in `.orchestrator/gates.json`, which you commit with the topology:
+
+```json
+{
+  "gates": [
+    { "id": "typecheck", "command": "npm run typecheck" },
+    { "id": "test", "command": "npm test", "timeoutSec": 900 }
+  ]
+}
+```
+
+- Gates run in order in the child's worktree, after the child has exited. They stop at the first failure.
+- A failing gate turns a `completed` report into `failed`. The gate's output is what the caller reads, and each gate run appears in the run log.
+- With no file there are no gates. A report is then taken as written.
+- Gate commands run through `sh -c`, with the same trust as the agent CLIs. Only commit commands you would run yourself.
+
+Retries are counted per **task**, not per edge for the whole run:
+
+- An agent can pass a `task_id` (letters, digits, `-` and `_`, up to 64 characters). Retries with the same id share one `maxRetries` budget. New work gets a new id.
+- A call without an id counts against the caller's stream on that edge, as before.
+- The same failure signature twice in a row **stalls** the task, and further attempts are refused until someone changes the plan. The signature is the failing gate and its last output line with digits masked, or the agent's own `failure_signature`.
+- A named task whose gates passed is **accepted**, and retrying it under the same id is refused.
+
+## Roles, plans and worktrees
+
+- **Access.** Each agent has `access`: `read-write` (default) or `read-only`. A read-only agent cannot edit files. Claude runs with its edit and shell tools denied, and Codex in its read-only sandbox. Gemini and OpenCode have no read-only mode that is verified here, so for them the runtime's check is the only enforcement. After every read-only run the runtime compares the worktree with its state before the run. A change fails the attempt, whatever the agent reported. The default "Debugger & QA" is read-only: it reviews and reports, and the developer makes the fix.
+- **Plans.** The orchestrator can call `plan_tasks` to set the tasks, in order, with what each depends on. Once a run has a plan, every delegation must name a planned task with a `task_id`, and a task waits until the tasks it depends on are accepted. A started task keeps its state through a replan, and a task that has started cannot be dropped.
+- **Worktrees.** An isolated agent works in its own branch. Its accepted work is committed and merged into the run's integration branch (`oc/<run>/integration`), one merge at a time, and the next isolated agent starts from that branch's tip. A conflicting merge fails the attempt and names the files, so a retry under the same `task_id` starts from the current tip. A shared agent writes directly in its caller's worktree. A shared worktree takes one writer at a time: a second writer is refused while the first runs, and readers cannot share it with a writer.
+- **The run log.** The Tasks tab on the orchestration canvas shows the plan, each attempt with its budget, its state, why a call was refused, the signature of a repeated failure, and the merge result.
+
+## Evals
+
+The runtime is checked by a fixed suite of scripted scenarios that run through the real router with a test double for the CLI:
+
+```bash
+cd src-tauri && cargo test --test orchestration_e2e eval_suite -- --nocapture
+```
+
+It prints a table of calls, refusals, completions, failures, accepted and stalled tasks, gate failures and merges for each scenario, and writes `condurence-evals/report.json` to the temp directory. Each scenario is also checked against its expected outcome, so a change that alters the runtime's behaviour fails the suite.
+
+The live version uses the real provider CLIs on a repository with a seeded bug. It spends your provider subscription, so it does not run by default:
+
+```bash
+cd src-tauri && cargo test --test orchestration_e2e live_eval -- --ignored --nocapture
+```
 
 ## Where things live
 

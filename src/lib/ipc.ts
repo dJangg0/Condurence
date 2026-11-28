@@ -3,20 +3,28 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ApprovalRequestEvent,
   AgentProvider,
+  ArchiveOutcome,
+  ArchivePreview,
+  FileContent,
   FileDiff,
+  FileListing,
   MergeResult,
   NodeStatusEvent,
   OrchestrationGraph,
   ModelOption,
+  ProviderUsage,
   RepoMetadata,
   RepoRecord,
   RunEvent,
   RunLogEvent,
+  RepoGitSettings,
+  RunRecord,
   WorktreeInfo,
 } from "../types/orchestration";
 import type { ProviderAuth } from "../types/providers";
 import type { GitHubAccount, GitHubRepoConnection, GitHubRepoSummary } from "../types/github";
-import type { PullRequestStatus, SyncOutcome } from "../types/pulls";
+import type { BranchPull, PullRequestStatus, SyncOutcome } from "../types/pulls";
+import type { ReviewContextPayload } from "./review";
 
 /** Typed wrappers over the Tauri command surface (HANDOFF §6.4). */
 export const ipc = {
@@ -43,21 +51,37 @@ export const ipc = {
   listWorktrees: (repoPath: string) => invoke<WorktreeInfo[]>("list_worktrees", { repoPath }),
   createWorktree: (repoPath: string, branchName: string, folderName: string, startPoint?: string) =>
     invoke<WorktreeInfo>("create_worktree", { repoPath, branchName, folderName, startPoint: startPoint ?? null }),
-  removeWorktree: (repoPath: string, branchName: string, folderName: string) =>
-    invoke<void>("remove_worktree", { repoPath, branchName, folderName }),
+  archivePreview: (repoPath: string, worktreePath: string, branch: string | null) =>
+    invoke<ArchivePreview>("archive_preview", { repoPath, worktreePath, branch }),
+  archiveWorkspace: (repoPath: string, branch: string | null, folderName: string, discardChanges: boolean) =>
+    invoke<ArchiveOutcome>("archive_workspace", { repoPath, branch, folderName, discardChanges }),
   mergeWorktree: (repoPath: string, branchName: string, targetBranch: string, squash: boolean) =>
     invoke<MergeResult>("merge_worktree", { repoPath, branchName, targetBranch, squash }),
-  pullRequestStatus: (worktreePath: string, branch: string) =>
-    invoke<PullRequestStatus | null>("pull_request_status", { worktreePath, branch }),
-  createPullRequest: (worktreePath: string, branch: string, base: string) =>
-    invoke<PullRequestStatus>("create_pull_request", { worktreePath, branch, base }),
-  mergePullRequest: (worktreePath: string, branch: string) =>
-    invoke<PullRequestStatus>("merge_pull_request", { worktreePath, branch }),
-  syncWithBase: (worktreePath: string, branch: string, base: string) =>
-    invoke<SyncOutcome>("sync_with_base", { worktreePath, branch, base }),
+  pullRequestStatus: (worktreePath: string, branch: string, remote: string) =>
+    invoke<PullRequestStatus | null>("pull_request_status", { worktreePath, branch, remote }),
+  listPullRequests: (repoPath: string) => invoke<BranchPull[]>("list_pull_requests", { repoPath }),
+  createPullRequest: (worktreePath: string, branch: string, base: string, remote: string) =>
+    invoke<PullRequestStatus>("create_pull_request", { worktreePath, branch, base, remote }),
+  mergePullRequest: (worktreePath: string, branch: string, remote: string) =>
+    invoke<PullRequestStatus>("merge_pull_request", { worktreePath, branch, remote }),
+  syncWithBase: (worktreePath: string, branch: string, base: string, remote: string) =>
+    invoke<SyncOutcome>("sync_with_base", { worktreePath, branch, base, remote }),
+  createWorkspace: (repoPath: string) => invoke<WorktreeInfo>("create_workspace", { repoPath }),
+  getRepoGitSettings: (repoPath: string) => invoke<RepoGitSettings>("get_repo_git_settings", { repoPath }),
+  saveRepoGitSettings: (repoPath: string, settings: RepoGitSettings) =>
+    invoke<void>("save_repo_git_settings", { repoPath, settings }),
+  listRemotes: (repoPath: string) => invoke<string[]>("list_remotes", { repoPath }),
+  listRemoteBranches: (repoPath: string, remote: string) =>
+    invoke<string[]>("list_remote_branches", { repoPath, remote }),
   startAgentTask: (sessionId: string, worktreePath: string, task: "review" | "resolve", base: string) =>
     invoke<void>("start_agent_task", { sessionId, worktreePath, task, base }),
   getGitDiff: (worktreePath: string) => invoke<FileDiff[]>("get_git_diff", { worktreePath }),
+  getBranchDiff: (worktreePath: string, base: string) => invoke<FileDiff[]>("get_branch_diff", { worktreePath, base }),
+  listWorktreeFiles: (worktreePath: string) => invoke<FileListing>("list_worktree_files", { worktreePath }),
+  readWorktreeFile: (worktreePath: string, path: string) =>
+    invoke<FileContent>("read_worktree_file", { worktreePath, path }),
+  startReview: (sessionId: string, worktreePath: string, base: string, agent: string, context: ReviewContextPayload) =>
+    invoke<void>("start_review", { sessionId, worktreePath, base, agent, context }),
   watchWorkspace: (worktreePath: string) => invoke<string>("watch_workspace", { worktreePath }),
   unwatchWorkspace: (worktreePath: string) => invoke<void>("unwatch_workspace", { worktreePath }),
 
@@ -75,6 +99,13 @@ export const ipc = {
   resolveApprovalGate: (runId: string, edgeId: string, approved: boolean) =>
     invoke<void>("resolve_approval_gate", { runId, edgeId, approved }),
   listRunEvents: (runId: string, limit?: number) => invoke<RunEvent[]>("list_run_events", { runId, limit: limit ?? null }),
+  listRuns: (repoPath: string, limit?: number) => invoke<RunRecord[]>("list_runs", { repoPath, limit: limit ?? null }),
+  runWorktrees: (runId: string) => invoke<WorktreeInfo[]>("run_worktrees", { runId }),
+  startBranch: (worktreePath: string, branch: string) => invoke<void>("start_branch", { worktreePath, branch }),
+  commitWorktreeChanges: (worktreePath: string, message: string) =>
+    invoke<string | null>("commit_worktree_changes", { worktreePath, message }),
+  runUsage: (runId: string) => invoke<ProviderUsage[]>("run_usage", { runId }),
+  providerUsageSummary: () => invoke<ProviderUsage[]>("provider_usage_summary"),
 };
 
 /** Typed subscriptions over the runtime event bus (HANDOFF §6.4 events). */

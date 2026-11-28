@@ -1,6 +1,7 @@
 //! Core runtime: owns every long-lived subsystem and coordinates startup and shutdown.
 
 pub mod events;
+pub mod recovery;
 pub mod state_db;
 
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use crate::git::{self, locks::RepoLocks, watcher::WorkspaceWatchers};
 use crate::graph;
 use crate::mcp::{self, router::Router};
 use crate::pty::PtyManager;
+use crate::usage::UsageReader;
 use events::EventSink;
 use state_db::{RepoRecord, StateDb};
 
@@ -25,6 +27,8 @@ pub struct CoreRuntime {
     pub locks: Arc<RepoLocks>,
     pub watchers: Arc<WorkspaceWatchers>,
     pub router: Arc<Router>,
+    /// Shared parse cache for provider session logs, used by the run meter and the profile pane.
+    pub usage: Arc<UsageReader>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -40,6 +44,16 @@ impl CoreRuntime {
     pub fn new(app: AppHandle) -> AppResult<Self> {
         let events: Arc<dyn EventSink> = Arc::new(app);
         let db = Arc::new(StateDb::open(&state_db_path()?)?);
+        // Nothing can still be running at startup, so runs the last launch left live are over.
+        let launched = now_ms();
+        db.close_interrupted_runs(launched)?;
+        // A crash skips the exit hook, and agents run in their own process groups, so the ones the
+        // last launch started may still be running. Stop them before this launch starts any of its own.
+        match recovery::recover(&db, launched, &mcp::compiler::run_dirs_root(), std::time::Duration::from_millis(1500)) {
+            Ok(report) if !report.is_empty() => eprintln!("recovered from an unclean exit: {report:?}"),
+            Ok(_) => {}
+            Err(e) => eprintln!("could not clean up after the last launch: {e}"),
+        }
         let pty = Arc::new(PtyManager::new(events.clone()));
         let locks = Arc::new(RepoLocks::default());
         let watchers = Arc::new(WorkspaceWatchers::default());
@@ -64,6 +78,7 @@ impl CoreRuntime {
             locks,
             watchers,
             router,
+            usage: Arc::new(UsageReader::default()),
         })
     }
 
@@ -119,7 +134,71 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Condurence's folder in the home directory, `~/.condurence`: the state database and the global
+/// skills. A folder left by the app's earlier name, `~/.openconductor`, is moved over the first
+/// time, so the run history, the repository list and the skills carry on.
+pub fn data_dir() -> Option<PathBuf> {
+    home_dir().map(|home| migrate_data_dir(&home))
+}
+
+/// The data folder under `home`. When only the earlier folder exists it is renamed, which is atomic
+/// on one volume and takes the database's WAL files with it. If it cannot be moved, that folder
+/// keeps being used, so nothing is left behind and the app does not start with an empty history.
+pub fn migrate_data_dir(home: &Path) -> PathBuf {
+    let current = home.join(".condurence");
+    let earlier = home.join(".openconductor");
+    if !current.exists() && earlier.is_dir() && std::fs::rename(&earlier, &current).is_err() {
+        return earlier;
+    }
+    current
+}
+
 fn state_db_path() -> AppResult<PathBuf> {
-    let home = home_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
-    Ok(home.join(".openconductor").join("state.db"))
+    let dir = data_dir().ok_or_else(|| AppError::msg("cannot locate the home directory"))?;
+    Ok(dir.join("state.db"))
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_earlier_folder_is_moved_over_with_everything_in_it() {
+        let home = tempfile::tempdir().unwrap();
+        let earlier = home.path().join(".openconductor");
+        std::fs::create_dir_all(earlier.join("skills")).unwrap();
+        std::fs::write(earlier.join("state.db"), "runs").unwrap();
+        std::fs::write(earlier.join("state.db-wal"), "pending writes").unwrap();
+        std::fs::write(earlier.join("skills").join("planner.md"), "plan").unwrap();
+
+        let dir = migrate_data_dir(home.path());
+
+        assert_eq!(dir, home.path().join(".condurence"));
+        assert!(!earlier.exists(), "the earlier folder is gone, not copied");
+        assert_eq!(std::fs::read_to_string(dir.join("state.db")).unwrap(), "runs");
+        assert_eq!(std::fs::read_to_string(dir.join("state.db-wal")).unwrap(), "pending writes");
+        assert_eq!(std::fs::read_to_string(dir.join("skills").join("planner.md")).unwrap(), "plan");
+    }
+
+    #[test]
+    fn a_folder_that_already_exists_is_never_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".condurence")).unwrap();
+        std::fs::write(home.path().join(".condurence").join("state.db"), "new").unwrap();
+        std::fs::create_dir_all(home.path().join(".openconductor")).unwrap();
+        std::fs::write(home.path().join(".openconductor").join("state.db"), "old").unwrap();
+
+        let dir = migrate_data_dir(home.path());
+
+        assert_eq!(std::fs::read_to_string(dir.join("state.db")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(home.path().join(".openconductor").join("state.db")).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_fresh_home_gets_the_new_path_and_nothing_is_created_for_it() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = migrate_data_dir(home.path());
+        assert_eq!(dir, home.path().join(".condurence"));
+        assert!(!dir.exists() && !home.path().join(".openconductor").exists());
+    }
 }

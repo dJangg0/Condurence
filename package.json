@@ -1,5 +1,5 @@
 {
-  "name": "open-conductor",
+  "name": "condurence",
   "version": "0.1.0",
   "description": "Condurence: native ADE with worktree workspaces and railway-style multi-agent orchestration",
   "main": "index.js",

@@ -13,6 +13,18 @@ export type PullRequestStatus = {
   mergeStateStatus: string;
   reviewDecision: string | null;
   checks: ChecksState;
+  /** The commit at the tip of the PR's branch as GitHub last saw it. */
+  headSha?: string | null;
+};
+
+/** A PR from the repository's list, named by the branch it was opened from. Mirrors `BranchPull`. */
+export type BranchPull = {
+  branch: string;
+  number: number;
+  url: string;
+  /** GitHub's state: `OPEN`, `CLOSED` or `MERGED`. */
+  state: string;
+  headSha: string | null;
 };
 
 /** What `sync_with_base` did. `conflicts` lists files still unmerged when it stopped. */

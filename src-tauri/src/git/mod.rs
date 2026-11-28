@@ -3,7 +3,9 @@
 
 pub mod cmd;
 pub mod diff_engine;
+pub mod files;
 pub mod locks;
+pub mod remotes;
 pub mod watcher;
 pub mod worktree;
 
